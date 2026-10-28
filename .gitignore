@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 *.db
 .venv/
+sessions/
+data/
+supplier_accounts.json
