@@ -62,10 +62,14 @@ def persist(db, account, chat_id, message, advance=False):
 
 async def monitor_account(config, db):
     name = config["name"]
-    session_env = config["session_env"]
-    session_string = os.environ[session_env]
-    api_id = int(os.environ[config["api_id_env"]])
-    api_hash = os.environ[config["api_hash_env"]]
+    if "session_string" in config:
+        session_string = config["session_string"]
+        api_id = config["api_id"]
+        api_hash = config["api_hash"]
+    else:
+        session_string = os.environ[config["session_env"]]
+        api_id = int(os.environ[config["api_id_env"]])
+        api_hash = os.environ[config["api_hash_env"]]
     chats = config["chats"]
     if not chats:
         raise ValueError(f"{name}: no supplier chats configured")
@@ -75,6 +79,10 @@ async def monitor_account(config, db):
         if not await client.is_user_authorized():
             raise RuntimeError(f"{name}: session not authorized")
         entities = {}
+        # StringSession does not preserve Telethon's entity cache. Populate it
+        # from dialogs so explicit numeric IDs also work after a restart.
+        if any(isinstance(chat, int) for chat in chats):
+            await client.get_dialogs()
         for chat in chats:
             entity = await client.get_entity(chat)
             entities[await client.get_peer_id(entity)] = entity
@@ -97,6 +105,8 @@ async def monitor_account(config, db):
             async for message in client.iter_messages(entity, limit=200):
                 persist(db, name, chat_id, message)
         log.info("Telegram collector %s monitoring %s chats", name, len(entities))
+        if config.get("on_ready"):
+            config["on_ready"]()
         await client.run_until_disconnected()
     finally:
         await client.disconnect()
@@ -118,3 +128,4 @@ async def run_collector(database_url):
         await asyncio.gather(*(monitor_account(account, db) for account in accounts))
     finally:
         engine.dispose()
+

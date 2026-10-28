@@ -8,7 +8,7 @@ import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +31,14 @@ async def run_bot():
         if message.from_user is None or message.from_user.id != owner_id:
             await message.answer("Доступ закрыт.")
             return
-        await message.answer(
-            "⚡ VOLT Control\n\nБот подключён. "
-            "Панель управления и безопасный вход в Telegram-аккаунты "
-            "готовятся. Коды авторизации и пароли в чат не отправляй."
-        )
+        url = os.getenv('VOLT_MINIAPP_URL', '')
+        if os.getenv('VOLT_MINIAPP_ENABLED') == '1' and url.startswith('https://'):
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text='Открыть VOLT Control', web_app=WebAppInfo(url=url))
+            ]])
+            await message.answer('⚡ VOLT Control\n\nОткрой панель для подключения аккаунтов.', reply_markup=keyboard)
+        else:
+            await message.answer('⚡ VOLT Control\n\nMini App ещё не настроено. Коды авторизации и пароли в чат не отправляй.')
 
     @dp.message(Command("status"))
     async def status(message: Message):
@@ -54,3 +57,4 @@ async def run_bot():
         await dp.start_polling(bot, handle_signals=False)
     finally:
         await bot.session.close()
+

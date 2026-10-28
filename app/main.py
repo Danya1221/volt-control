@@ -112,6 +112,8 @@ async def collector_supervisor():
 async def lifespan(app):
     task = None
     bot_task = None
+    from app import miniapp
+    await miniapp.start()
     if os.getenv("VOLT_BOT_ENABLED") == "1":
         if not os.getenv("TG_BOT_TOKEN") or not os.getenv("VOLT_OWNER_TG_ID", "").isdigit():
             raise RuntimeError("TG_BOT_TOKEN and VOLT_OWNER_TG_ID required to enable bot")
@@ -127,6 +129,7 @@ async def lifespan(app):
     try:
         yield
     finally:
+        await miniapp.stop()
         for running in (task, bot_task):
             if running:
                 running.cancel()
@@ -242,3 +245,27 @@ class ParsePreviewIn(BaseModel):
 @app.post("/admin/price-lists/preview", dependencies=[Depends(admin)])
 def preview_price_list(body: ParsePreviewIn):
     return parse_lines(body.text)
+
+from fastapi.responses import FileResponse
+from pathlib import Path
+from app.miniapp import router as miniapp_router
+
+app.include_router(miniapp_router)
+
+@app.middleware('http')
+async def no_cache_miniapp(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith('/miniapp'):
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
+
+@app.get('/miniapp', include_in_schema=False)
+def miniapp_page():
+    return FileResponse(Path(__file__).parent / 'static' / 'miniapp.html', headers={
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+        'Content-Security-Policy': "default-src 'none'; script-src https://telegram.org 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org",
+    })
+
