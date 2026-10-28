@@ -162,3 +162,63 @@ def test_message_inbox_is_owner_only_and_scoped_to_connected_account(monkeypatch
     assert preview['candidates'][0]['cost'] == '60000'
     assert preview['can_publish'] is False
     engine.dispose()
+
+
+
+def test_reviewed_import_and_catalog_controls(monkeypatch):
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from app.integrated_collector import SupplierMessage, Base as CollectorBase
+    from app.main import Product, Supplier, Offer, Markup, today
+    monkeypatch.setenv('VOLT_MINIAPP_ENABLED', '1')
+    monkeypatch.setenv('TG_BOT_TOKEN', 'bot-token')
+    monkeypatch.setenv('VOLT_OWNER_TG_ID', '123')
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    miniapp.Base.metadata.create_all(engine)
+    CollectorBase.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    monkeypatch.setattr(miniapp, 'Sessions', sessions)
+    with sessions() as db:
+        db.add(miniapp.ReaderAccount(slot=1, telegram_id='111', display_name='Reader', encrypted_session='x', chats_json='[]'))
+        db.add(SupplierMessage(account='miniapp-111', chat_id=123, message_id=10,
+                               text='iPhone 16 eSIM 60000', seen_at=datetime.now(timezone.utc)))
+        db.commit()
+        msg_id = db.scalar(select(SupplierMessage.id))
+    client = TestClient(app)
+    headers = {'X-Telegram-Init-Data': signed()}
+    preview_url = f'/miniapp/api/accounts/1/messages/{msg_id}/preview'
+    import_url = f'/miniapp/api/accounts/1/messages/{msg_id}/import-line'
+    preview = client.get(preview_url, headers=headers).json()
+    payload = {'line': 1, 'message_hash': preview['message_hash'], 'supplier_name': 'Supplier', 'confirmed_today': True}
+    assert client.post(import_url, json=payload).status_code == 401
+    assert client.post(import_url, json={**payload, 'confirmed_today': False}, headers=headers).status_code == 422
+    assert client.post(import_url, json={**payload, 'message_hash': '0' * 64}, headers=headers).status_code == 409
+    assert client.post(import_url, json={**payload, 'line': 2}, headers=headers).status_code == 422
+    with sessions() as db:
+        assert db.scalars(select(Product)).all() == []
+        assert db.scalars(select(Supplier)).all() == []
+    response = client.post(import_url, json=payload, headers=headers)
+    assert response.status_code == 200
+    product_id = response.json()['product_id']
+    assert response.json()['approved'] is False
+    with sessions() as db:
+        offer = db.scalar(select(Offer))
+        assert str(offer.cost) == '60000.00' and offer.confirmed_date == today()
+        assert db.scalar(select(miniapp.OfferImport)).message_hash == preview['message_hash']
+    assert client.get('/miniapp/api/products', headers=headers).json()[0]['status'] == 'hidden'
+    assert client.put('/miniapp/api/markups', json={'scope': 'category', 'target': 'Смартфоны', 'amount': '5000'}, headers=headers).status_code == 200
+    assert client.patch(f'/miniapp/api/products/{product_id}/approve', json={'value': True}, headers=headers).status_code == 200
+    assert client.get('/miniapp/api/products', headers=headers).json()[0]['price'] == '65000.00'
+    assert client.put('/miniapp/api/markups', json={'scope': 'sku', 'target': str(product_id), 'amount': '6000'}, headers=headers).status_code == 200
+    assert client.get('/miniapp/api/products', headers=headers).json()[0]['price'] == '66000.00'
+    assert client.patch(f'/miniapp/api/products/{product_id}/hide', json={'value': True}, headers=headers).status_code == 200
+    assert client.get('/miniapp/api/products', headers=headers).json()[0]['status'] == 'hidden'
+    with sessions() as db:
+        row = db.get(SupplierMessage, msg_id)
+        row.text = 'iPhone 16 eSIM 70000'
+        db.commit()
+    assert client.post(import_url, json=payload, headers=headers).status_code == 409
+    with sessions() as db:
+        assert str(db.scalar(select(Offer)).cost) == '60000.00'
+        assert len(db.scalars(select(miniapp.OfferImport)).all()) == 1
+    engine.dispose()

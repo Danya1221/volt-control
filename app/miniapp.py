@@ -9,19 +9,23 @@ import logging
 import os
 import time
 from contextlib import suppress
+from datetime import datetime, timezone
+from decimal import Decimal
 from urllib.parse import parse_qsl
 
 import qrcode
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import Integer, String, Text, select
+from sqlalchemy import BigInteger, Integer, String, Text, DateTime, Numeric, ForeignKey, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, PasswordHashInvalidError
 from telethon.sessions import StringSession
 
-from app.main import Base, Sessions
+from app.main import Base, Sessions, Supplier, Product, Offer, Markup, ProductIn, FlagIn, AmountIn, key_for, today
+from app.main import products as list_products, approve as approve_product, hide as hide_product, markup as set_markup
 from app.integrated_collector import Base as CollectorBase, SupplierMessage, monitor_account
 from app.price_parser import parse_lines
 
@@ -39,6 +43,21 @@ class ReaderAccount(Base):
     display_name: Mapped[str] = mapped_column(String(200))
     encrypted_session: Mapped[str] = mapped_column(Text)
     chats_json: Mapped[str] = mapped_column(Text, default='[]')
+
+
+class OfferImport(Base):
+    """Trace each explicitly reviewed import back to its captured message."""
+    __tablename__ = 'reviewed_offer_imports'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    supplier_id: Mapped[int] = mapped_column(ForeignKey('suppliers.id'))
+    product_id: Mapped[int] = mapped_column(ForeignKey('products.id'))
+    account: Mapped[str] = mapped_column(String(100))
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    line: Mapped[int] = mapped_column(Integer)
+    message_hash: Mapped[str] = mapped_column(String(64))
+    cost: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 def verify_init_data(raw, token, owner_id, now=None):
@@ -258,7 +277,119 @@ def message_preview(slot: int, message_id: int):
             raise HTTPException(404, 'Сообщение не найдено')
         if len(row.text) > 500000:
             raise HTTPException(422, 'Сообщение слишком большое для предварительного разбора')
-        return parse_lines(row.text)
+        result = parse_lines(row.text)
+        result['message_hash'] = hashlib.sha256(row.text.encode('utf-8')).hexdigest()
+        return result
+
+
+class ImportLineIn(BaseModel):
+    line: int = Field(ge=1)
+    message_hash: str = Field(pattern=r'^[a-f0-9]{64}$')
+    supplier_name: str = Field(min_length=1, max_length=200)
+    confirmed_today: bool
+
+
+@router.post('/accounts/{slot}/messages/{message_id}/import-line', dependencies=[Depends(owner)])
+def import_line(slot: int, message_id: int, body: ImportLineIn):
+    """Import exactly one reviewed candidate, never a complete supplier batch."""
+    validate_slot(slot)
+    name = body.supplier_name.strip()
+    if not name or not body.confirmed_today:
+        raise HTTPException(422, 'Укажите поставщика и подтвердите, что цена актуальна сегодня')
+    with Sessions() as db:
+        account = db.get(ReaderAccount, slot)
+        if not account:
+            raise HTTPException(404, 'Сначала подключите аккаунт')
+        account_key = f'miniapp-{account.telegram_id}'
+        row = db.scalar(select(SupplierMessage).where(SupplierMessage.id == message_id,
+                                                       SupplierMessage.account == account_key).with_for_update())
+        if row is None:
+            raise HTTPException(404, 'Сообщение не найдено')
+        if len(row.text) > 500000:
+            raise HTTPException(422, 'Сообщение слишком большое')
+        fingerprint = hashlib.sha256(row.text.encode('utf-8')).hexdigest()
+        if not hmac.compare_digest(fingerprint, body.message_hash):
+            raise HTTPException(409, 'Сообщение изменилось. Разберите его заново')
+        candidate = next((c for c in parse_lines(row.text)['candidates'] if c['line'] == body.line), None)
+        if not candidate:
+            raise HTTPException(422, 'Эта строка требует дополнительной проверки и не может быть добавлена')
+        cost = Decimal(candidate['cost'])
+        if cost > Decimal('999999999999.99') or len(candidate['model']) > 200:
+            raise HTTPException(422, 'Название или цена превышает допустимый размер')
+        product_input = ProductIn(brand=candidate['brand'], model=candidate['model'],
+                                  category=candidate['category'], sim=candidate['sim'])
+        sku = key_for(product_input)
+        if len(sku) > 600:
+            raise HTTPException(422, 'Описание товара слишком длинное')
+        try:
+            supplier = db.scalar(select(Supplier).where(Supplier.name == name))
+            if supplier is None:
+                supplier = Supplier(name=name)
+                db.add(supplier)
+                db.flush()
+            product = db.scalar(select(Product).where(Product.sku_key == sku))
+            if product is None:
+                product = Product(sku_key=sku, **product_input.model_dump(), approved=False, hidden=False)
+                db.add(product)
+                db.flush()
+            offer = db.scalar(select(Offer).where(Offer.product_id == product.id, Offer.supplier_id == supplier.id))
+            if offer is None:
+                offer = Offer(product_id=product.id, supplier_id=supplier.id, cost=cost,
+                              confirmed_date=today(), active=True)
+                db.add(offer)
+            else:
+                offer.cost, offer.confirmed_date, offer.active = cost, today(), True
+            db.add(OfferImport(supplier_id=supplier.id, product_id=product.id, account=account_key,
+                               chat_id=row.chat_id, message_id=row.message_id, line=body.line,
+                               message_hash=fingerprint, cost=cost, imported_at=datetime.now(timezone.utc)))
+            db.commit()
+            return {'product_id': product.id, 'approved': product.approved}
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, 'Данные изменились. Обновите панель и повторите') from None
+
+
+@router.get('/products', dependencies=[Depends(owner)])
+def mini_products():
+    with Sessions() as db:
+        return list_products(db)
+
+
+@router.patch('/products/{product_id}/approve', dependencies=[Depends(owner)])
+def mini_approve(product_id: int, body: FlagIn):
+    with Sessions() as db:
+        return approve_product(product_id, body, db)
+
+
+@router.patch('/products/{product_id}/hide', dependencies=[Depends(owner)])
+def mini_hide(product_id: int, body: FlagIn):
+    with Sessions() as db:
+        return hide_product(product_id, body, db)
+
+
+class MiniMarkupIn(BaseModel):
+    scope: str
+    target: str = Field(min_length=1, max_length=200)
+    amount: Decimal = Field(ge=0, le=Decimal('999999999999.99'), max_digits=14, decimal_places=2)
+
+
+@router.get('/markups', dependencies=[Depends(owner)])
+def mini_markups():
+    with Sessions() as db:
+        return [{'scope': rule.scope, 'target': rule.target, 'amount': str(rule.amount)}
+                for rule in db.scalars(select(Markup).order_by(Markup.scope, Markup.target)).all()]
+
+
+@router.put('/markups', dependencies=[Depends(owner)])
+def mini_set_markup(body: MiniMarkupIn):
+    if body.target != body.target.strip() or not body.target.strip():
+        raise HTTPException(422, 'Укажите категорию, модель или ID товара')
+    if body.scope == 'sku' and not body.target.isdigit():
+        raise HTTPException(422, 'Для товара укажите его числовой ID')
+    with Sessions() as db:
+        if body.scope == 'sku' and db.get(Product, int(body.target)) is None:
+            raise HTTPException(404, 'Товар не найден')
+        return set_markup(body.scope, body.target, AmountIn(amount=body.amount), db)
 
 
 @router.post('/accounts/{slot}/login', dependencies=[Depends(owner)])
@@ -341,3 +472,4 @@ async def disconnect(slot: int):
                 db.delete(row)
                 db.commit()
     return {'ok': True}
+
