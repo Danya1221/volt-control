@@ -6,25 +6,25 @@ Parsing never publishes or applies a supplier batch automatically.
 import re
 from decimal import Decimal
 
-PRICE = re.compile(r"(?P<price>\\d[\\d \\u00a0]{2,})\\s*(?:₽|руб\\.?|р\\.)?\\s*$", re.I)
+PRICE = re.compile(r"(?P<price>\d[\d \u00a0]{2,})\s*(?:₽|руб\.?|р\.)?\s*$", re.I)
 SIM = [
-    ("SIM + eSIM", re.compile(r"(?<!\\w)(?:sim\\s*\\+\\s*esim|sim\\s*/\\s*esim)(?!\\w)", re.I)),
-    ("2 SIM", re.compile(r"(?<!\\w)(?:2\\s*sim|dual\\s*sim)(?!\\w)", re.I)),
-    ("eSIM", re.compile(r"(?<!\\w)esim(?!\\w)", re.I)),
+    ("SIM + eSIM", re.compile(r"(?<!\w)(?:sim\s*\+\s*esim|sim\s*/\s*esim)(?!\w)", re.I)),
+    ("2 SIM", re.compile(r"(?<!\w)(?:2\s*sim|dual\s*sim)(?!\w)", re.I)),
+    ("eSIM", re.compile(r"(?<!\w)esim(?!\w)", re.I)),
 ]
 BRANDS = {
-    "Apple": re.compile(r"\\b(?:iphone|ipad|macbook|apple)\\b", re.I),
-    "Samsung": re.compile(r"\\b(?:samsung|galaxy)\\b", re.I),
-    "Google": re.compile(r"\\b(?:pixel|google)\\b", re.I),
-    "Sony": re.compile(r"\\b(?:sony|wh-1000)\\b", re.I),
-    "Meta Ray-Ban": re.compile(r"\\b(?:ray[ -]?ban|meta)\\b", re.I),
-    "Insta360": re.compile(r"\\binsta360\\b", re.I),
-    "DJI": re.compile(r"\\bdji\\b", re.I),
-    "Nintendo": re.compile(r"\\b(?:nintendo|switch)\\b", re.I),
+    "Apple": re.compile(r"\b(?:iphone|ipad|macbook|apple)\b", re.I),
+    "Samsung": re.compile(r"\b(?:samsung|galaxy)\b", re.I),
+    "Google": re.compile(r"\b(?:pixel|google)\b", re.I),
+    "Sony": re.compile(r"\b(?:sony|wh-1000)\b", re.I),
+    "Meta Ray-Ban": re.compile(r"\b(?:ray[ -]?ban|meta)\b", re.I),
+    "Insta360": re.compile(r"\binsta360\b", re.I),
+    "DJI": re.compile(r"\bdji\b", re.I),
+    "Nintendo": re.compile(r"\b(?:nintendo|switch)\b", re.I),
 }
-PHONE = re.compile(r"\\b(?:iphone|galaxy|pixel|oneplus|honor|nothing)\\b", re.I)
-TABLET = re.compile(r"\\b(?:ipad|tablet|tab\\s+s\\d+)\\b", re.I)
-LAPTOP = re.compile(r"\\b(?:macbook|laptop)\\b", re.I)
+PHONE = re.compile(r"\b(?:iphone|galaxy|pixel|oneplus|honor|nothing)\b", re.I)
+TABLET = re.compile(r"\b(?:ipad|tablet|tab\s+s\d+)\b", re.I)
+LAPTOP = re.compile(r"\b(?:macbook|laptop)\b", re.I)
 
 def parse_lines(text: str):
     accepted, review, ignored = [], [], []
@@ -36,7 +36,7 @@ def parse_lines(text: str):
         if not match:
             ignored.append({"line": number, "raw": original, "reason": "No terminal price"})
             continue
-        value = match.group("price").replace(" ", "").replace("\\u00a0", "")
+        value = match.group("price").replace(" ", "").replace("\u00a0", "")
         name = line[:match.start()].strip(" -–—:|")
         if not name or not value.isdecimal() or Decimal(value) <= 0:
             review.append({"line": number, "raw": original, "reason": "Invalid product or price"})
