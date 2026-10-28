@@ -25,3 +25,8 @@ This is the beginning of the production codebase, **not a completed shop**.
 - Missing/ambiguous smartphone SIM configurations require manual review.
 - Parser tests added in `tests/test_price_parser.py`.
 - **Not yet connected to Telegram.** No multipart assembly, supplier-specific mapping, or production-grade format coverage yet. Tests have not been executed in CI.
+
+## Telegram collector foundation
+- Added read-only Telethon collector for up to two pre-authorized user accounts.
+- New/edited message snapshots, restart catch-up, per-chat cursors.
+- See TELEGRAM_COLLECTOR.md for setup and limitations. Not integrated with PostgreSQL or automated publishing.
