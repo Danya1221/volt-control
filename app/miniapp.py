@@ -22,7 +22,8 @@ from telethon.errors import SessionPasswordNeededError, PasswordHashInvalidError
 from telethon.sessions import StringSession
 
 from app.main import Base, Sessions
-from app.integrated_collector import Base as CollectorBase, monitor_account
+from app.integrated_collector import Base as CollectorBase, SupplierMessage, monitor_account
+from app.price_parser import parse_lines
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix='/miniapp/api', dependencies=[])
@@ -220,6 +221,44 @@ async def accounts():
                        'chats': row['chats'] if row else [], 'monitor': worker_states.get(slot, 'not_configured'),
                        'login': attempts.get(slot, {}).get('state', 'idle')})
     return result
+
+
+@router.get('/accounts/{slot}/messages', dependencies=[Depends(owner)])
+def account_messages(slot: int, before: int | None = None):
+    """Show saved messages only; never fetch, send or apply prices here."""
+    validate_slot(slot)
+    account = saved(slot)
+    if not account:
+        raise HTTPException(404, 'Сначала подключите аккаунт')
+    with Sessions() as db:
+        query = select(SupplierMessage).where(
+            SupplierMessage.account == f"miniapp-{account['telegram_id']}"
+        )
+        if before is not None:
+            query = query.where(SupplierMessage.id < before)
+        rows = db.scalars(query.order_by(SupplierMessage.id.desc()).limit(21)).all()
+        return {'messages': [{'id': row.id, 'chat_id': str(row.chat_id),
+                               'message_id': row.message_id, 'text': row.text[:4000],
+                               'truncated': len(row.text) > 4000,
+                               'seen_at': row.seen_at.isoformat()} for row in rows[:20]],
+                'next_before': rows[19].id if len(rows) > 20 else None}
+
+
+@router.get('/accounts/{slot}/messages/{message_id}/preview', dependencies=[Depends(owner)])
+def message_preview(slot: int, message_id: int):
+    validate_slot(slot)
+    account = saved(slot)
+    if not account:
+        raise HTTPException(404, 'Сначала подключите аккаунт')
+    with Sessions() as db:
+        row = db.scalar(select(SupplierMessage).where(
+            SupplierMessage.id == message_id,
+            SupplierMessage.account == f"miniapp-{account['telegram_id']}"))
+        if row is None:
+            raise HTTPException(404, 'Сообщение не найдено')
+        if len(row.text) > 500000:
+            raise HTTPException(422, 'Сообщение слишком большое для предварительного разбора')
+        return parse_lines(row.text)
 
 
 @router.post('/accounts/{slot}/login', dependencies=[Depends(owner)])

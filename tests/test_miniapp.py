@@ -128,3 +128,37 @@ def test_qr_two_factor_and_same_account_rejection(monkeypatch):
         await miniapp.disconnect(2)
     asyncio.run(scenario())
     engine.dispose()
+
+
+def test_message_inbox_is_owner_only_and_scoped_to_connected_account(monkeypatch):
+    from datetime import datetime, timezone
+    from app.integrated_collector import SupplierMessage, Base as CollectorBase
+    monkeypatch.setenv('VOLT_MINIAPP_ENABLED', '1')
+    monkeypatch.setenv('TG_BOT_TOKEN', 'bot-token')
+    monkeypatch.setenv('VOLT_OWNER_TG_ID', '123')
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    miniapp.Base.metadata.create_all(engine)
+    CollectorBase.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    monkeypatch.setattr(miniapp, 'Sessions', sessions)
+    with sessions() as db:
+        db.add_all([
+            miniapp.ReaderAccount(slot=1, telegram_id='111', display_name='Reader 1', encrypted_session='x', chats_json='[]'),
+            miniapp.ReaderAccount(slot=2, telegram_id='222', display_name='Reader 2', encrypted_session='y', chats_json='[]'),
+            SupplierMessage(account='miniapp-111', chat_id=99, message_id=1, text='iPhone 16 eSIM 60000', seen_at=datetime.now(timezone.utc)),
+            SupplierMessage(account='miniapp-222', chat_id=99, message_id=2, text='Samsung Galaxy 2 SIM 70000', seen_at=datetime.now(timezone.utc)),
+        ])
+        db.commit()
+    client = TestClient(app)
+    assert client.get('/miniapp/api/accounts/1/messages').status_code == 401
+    headers = {'X-Telegram-Init-Data': signed()}
+    first = client.get('/miniapp/api/accounts/1/messages', headers=headers).json()
+    second = client.get('/miniapp/api/accounts/2/messages', headers=headers).json()
+    assert len(first['messages']) == len(second['messages']) == 1
+    msg_id = first['messages'][0]['id']
+    assert first['messages'][0]['text'] == 'iPhone 16 eSIM 60000'
+    assert client.get(f'/miniapp/api/accounts/2/messages/{msg_id}/preview', headers=headers).status_code == 404
+    preview = client.get(f'/miniapp/api/accounts/1/messages/{msg_id}/preview', headers=headers).json()
+    assert preview['candidates'][0]['cost'] == '60000'
+    assert preview['can_publish'] is False
+    engine.dispose()
