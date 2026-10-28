@@ -82,6 +82,10 @@ def key_for(p: ProductIn):
     return "|".join(v.strip().casefold() for v in (p.brand,p.model,p.category,p.memory,p.color,p.sim))
 
 db_url = os.getenv("DATABASE_URL", "sqlite:///./volt.db")
+if db_url.startswith("postgres://"):
+    db_url = "postgresql+psycopg://" + db_url[len("postgres://"):]
+elif db_url.startswith("postgresql://"):
+    db_url = "postgresql+psycopg://" + db_url[len("postgresql://"):]
 engine = create_engine(db_url, connect_args={"check_same_thread":False} if db_url.startswith("sqlite") else {}, pool_pre_ping=True)
 Sessions = sessionmaker(engine)
 app = FastAPI(title="VOLT Control",version="0.1.0")
