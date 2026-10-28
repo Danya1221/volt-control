@@ -111,6 +111,12 @@ async def collector_supervisor():
 @asynccontextmanager
 async def lifespan(app):
     task = None
+    bot_task = None
+    if os.getenv("VOLT_BOT_ENABLED") == "1":
+        if not os.getenv("TG_BOT_TOKEN") or not os.getenv("VOLT_OWNER_TG_ID", "").isdigit():
+            raise RuntimeError("TG_BOT_TOKEN and VOLT_OWNER_TG_ID required to enable bot")
+        from app.admin_bot import run_bot
+        bot_task = asyncio.create_task(run_bot())
     if os.getenv("VOLT_COLLECTOR_ENABLED") == "1":
         if os.getenv("WEB_CONCURRENCY", "1") != "1":
             raise RuntimeError("Integrated collector requires exactly one API worker")
@@ -121,10 +127,11 @@ async def lifespan(app):
     try:
         yield
     finally:
-        if task:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        for running in (task, bot_task):
+            if running:
+                running.cancel()
+                with suppress(asyncio.CancelledError):
+                    await running
 
 app = FastAPI(title="VOLT Control",version="0.1.0",lifespan=lifespan)
 Base.metadata.create_all(engine)
