@@ -183,3 +183,13 @@ def markup(scope:str,target:str,body:AmountIn,s:Session=Depends(session)):
     else:s.add(Markup(scope=scope,target=target,amount=body.amount))
     s.commit()
     return {"ok":True}
+
+# Preview-only: never persists parsed candidates or marks a price list complete.
+from app.price_parser import parse_lines
+
+class ParsePreviewIn(BaseModel):
+    text: str = Field(min_length=1, max_length=500000)
+
+@app.post("/admin/price-lists/preview", dependencies=[Depends(admin)])
+def preview_price_list(body: ParsePreviewIn):
+    return parse_lines(body.text)
