@@ -30,3 +30,10 @@ This is the beginning of the production codebase, **not a completed shop**.
 - Added read-only Telethon collector for up to two pre-authorized user accounts.
 - New/edited message snapshots, restart catch-up, per-chat cursors.
 - See TELEGRAM_COLLECTOR.md for setup and limitations. Not integrated with PostgreSQL or automated publishing.
+
+
+## Mini App: этап подключения аккаунтов
+- Добавлены owner-only Mini App, QR-вход в два слота с поддержкой Telegram 2FA, шифрование сессий и сохранение их в PostgreSQL.
+- Чаты для чтения задаются в панели; мониторинг запускается в том же процессе и восстанавливается после перезапуска. См. MINIAPP_RAILWAY.md.
+- QR-вход и сбор в реальном Railway/Telegram ещё требуют проверки после настройки секретов. Автоматические тесты используют имитацию Telegram и SQLite.
+- Сбор сообщений всё ещё не связан с применением прайсов. Обработка, управление товарами и публикация каталога через Mini App не завершены.
