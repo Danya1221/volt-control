@@ -18,3 +18,10 @@ This is the beginning of the production codebase, **not a completed shop**.
 3. Open `http://127.0.0.1:8000/docs` and supply `X-API-Key` for admin routes.
 
 **Security:** This repository is currently public. Never commit `.env`, Telegram sessions, API tokens or real supplier data. PostgreSQL password in Compose is a development placeholder and must be changed before any deployment. No Telegram publishing is enabled.
+
+## Supplier parsing increment
+- `app/price_parser.py` extracts conservative candidate rows from text and returns review/ignored lines.
+- `POST /admin/price-lists/preview` accepts `{"text":"..."}` under the admin API key and **does not write to the database**.
+- Missing/ambiguous smartphone SIM configurations require manual review.
+- Parser tests added in `tests/test_price_parser.py`.
+- **Not yet connected to Telegram.** No multipart assembly, supplier-specific mapping, or production-grade format coverage yet. Tests have not been executed in CI.
