@@ -21,6 +21,11 @@ async def run_bot():
     bot = Bot(token=token)
     dp = Dispatcher()
 
+    @dp.message(Command("myid"))
+    async def myid(message: Message):
+        if message.from_user:
+            await message.answer(f"Твой Telegram ID: {message.from_user.id}")
+
     @dp.message(Command("start"))
     async def start(message: Message):
         if message.from_user is None or message.from_user.id != owner_id:
