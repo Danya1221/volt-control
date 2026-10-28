@@ -1,5 +1,8 @@
 import os
 import hmac
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -88,7 +91,42 @@ elif db_url.startswith("postgresql://"):
     db_url = "postgresql+psycopg://" + db_url[len("postgresql://"):]
 engine = create_engine(db_url, connect_args={"check_same_thread":False} if db_url.startswith("sqlite") else {}, pool_pre_ping=True)
 Sessions = sessionmaker(engine)
-app = FastAPI(title="VOLT Control",version="0.1.0")
+logger = logging.getLogger(__name__)
+collector_status = {"enabled": False, "state": "disabled"}
+
+async def collector_supervisor():
+    from app.integrated_collector import run_collector
+    while True:
+        try:
+            collector_status["state"] = "running"
+            await run_collector(db_url)
+            collector_status["state"] = "disconnected"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            collector_status["state"] = "retrying"
+            logger.exception("Integrated Telegram collector failed; retrying in 30 seconds")
+        await asyncio.sleep(30)
+
+@asynccontextmanager
+async def lifespan(app):
+    task = None
+    if os.getenv("VOLT_COLLECTOR_ENABLED") == "1":
+        if os.getenv("WEB_CONCURRENCY", "1") != "1":
+            raise RuntimeError("Integrated collector requires exactly one API worker")
+        if not os.getenv("VOLT_SUPPLIER_CONFIG_JSON"):
+            raise RuntimeError("VOLT_SUPPLIER_CONFIG_JSON required when collector enabled")
+        collector_status["enabled"] = True
+        task = asyncio.create_task(collector_supervisor())
+    try:
+        yield
+    finally:
+        if task:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+app = FastAPI(title="VOLT Control",version="0.1.0",lifespan=lifespan)
 Base.metadata.create_all(engine)
 
 def session():
@@ -102,7 +140,7 @@ def admin(x_api_key: str | None = Header(None)):
 
 @app.get("/health")
 def health():
-    return {"ok":True,"demo_data":False}
+    return {"ok":True,"demo_data":False,"collector":collector_status["state"]}
 
 @app.post("/admin/suppliers",dependencies=[Depends(admin)])
 def add_supplier(body:NameIn,s:Session=Depends(session)):
