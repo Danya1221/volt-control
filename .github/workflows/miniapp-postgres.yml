@@ -28,3 +28,5 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
       - run: python -m pytest -q
+      - run: node tests/test_miniapp_ui.cjs
+

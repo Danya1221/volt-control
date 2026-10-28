@@ -30,12 +30,13 @@ def test_pricing_hierarchy_and_discount_cap():
         ])
         db.flush()
         day = pricing_for(db, p, datetime(2026, 10, 28, 14, tzinfo=TZ))
-        assert day["markup"] == "3000"
+        assert Decimal(day["markup"]) == Decimal("3000")
         assert Decimal(day["price"]) == Decimal("10000")
         night = pricing_for(db, p, datetime(2026, 10, 28, 21, tzinfo=TZ))
         assert Decimal(night["price"]) == Decimal("13500")
-        assert night["discount"] == "0.00"
+        assert Decimal(night["discount"]) == Decimal("0")
         stale = pricing_for(db, p, datetime(2026, 10, 29, 11, tzinfo=TZ))
         assert stale["status"] == "on_request"
         assert stale["price"] == "По запросу"
     engine.dispose()
+
