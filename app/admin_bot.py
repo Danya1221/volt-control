@@ -69,6 +69,8 @@ async def run_bot():
     async def other(message: Message):
         if message.from_user is None or message.from_user.id != owner_id:
             return
+        if message.chat.type != 'private':
+            return
         await message.answer("Доступные команды: /start, /status, /bindgroup. Не отправляй сюда коды входа.")
 
     try:
