@@ -1,10 +1,10 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>VOLT Control</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#10131b;color:#f3f5fa}body{margin:0;padding:22px 18px 55px;max-width:620px;margin-inline:auto}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 8px}p{line-height:1.5;color:#bdc6d8}.top{display:flex;gap:12px;align-items:center}.bolt{background:#b9ff63;color:#19240f;border-radius:12px;padding:10px;font-weight:900}.sub{font-size:13px;margin:4px 0 22px}.card{background:#1b202c;border:1px solid #30394a;border-radius:16px;padding:18px;margin:12px 0}.label{font-size:12px;color:#aab5ca;margin:12px 0 6px}.status{color:#b9ff63;font-size:14px}.muted{font-size:13px}button{background:#b9ff63;color:#17230f;border:0;border-radius:10px;padding:12px 15px;font:600 14px system-ui;cursor:pointer;margin:6px 6px 0 0}button.secondary{background:#303a4d;color:#fff}button.danger{background:#493038;color:#ffd1d5}button:disabled{opacity:.5}textarea,input{box-sizing:border-box;width:100%;background:#111722;color:#fff;border:1px solid #465266;border-radius:10px;padding:12px;font:14px system-ui}textarea{min-height:85px;resize:vertical}img{display:block;width:min(240px,100%);background:white;border-radius:8px;margin:12px auto}.error{color:#ffb3bd;white-space:pre-wrap}.notice{border-left:3px solid #b9ff63;padding-left:12px}details{border-top:1px solid #394355;padding:10px 0}summary{cursor:pointer;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px system-ui;color:#d5dfec;max-height:300px;overflow:auto}.result{font-size:13px;color:#c7d0df}
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#10131b;color:#f3f5fa}body{margin:0;padding:22px 18px 55px;max-width:620px;margin-inline:auto}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 8px}p{line-height:1.5;color:#bdc6d8}.top{display:flex;gap:12px;align-items:center}.bolt{background:#b9ff63;color:#19240f;border-radius:12px;padding:10px;font-weight:900}.sub{font-size:13px;margin:4px 0 22px}.card{background:#1b202c;border:1px solid #30394a;border-radius:16px;padding:18px;margin:12px 0}.label{font-size:12px;color:#aab5ca;margin:12px 0 6px}.status{color:#b9ff63;font-size:14px}.muted{font-size:13px}button{background:#b9ff63;color:#17230f;border:0;border-radius:10px;padding:12px 15px;font:600 14px system-ui;cursor:pointer;margin:6px 6px 0 0}button.secondary{background:#303a4d;color:#fff}button.danger{background:#493038;color:#ffd1d5}button:disabled{opacity:.5}textarea,input,select{box-sizing:border-box;width:100%;background:#111722;color:#fff;border:1px solid #465266;border-radius:10px;padding:12px;font:14px system-ui}textarea{min-height:85px;resize:vertical}img{display:block;width:min(240px,100%);background:white;border-radius:8px;margin:12px auto}.error{color:#ffb3bd;white-space:pre-wrap}.notice{border-left:3px solid #b9ff63;padding-left:12px}details{border-top:1px solid #394355;padding:10px 0}summary{cursor:pointer;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px system-ui;color:#d5dfec;max-height:300px;overflow:auto}.result{font-size:13px;color:#c7d0df}
 </style></head><body>
 <div class="top"><div class="bolt">⚡</div><div><h1>VOLT Control</h1><div class="sub">Управление аккаунтами поставщиков</div></div></div>
-<p class="notice muted">Подключайте аккаунты и просматривайте полученные сообщения. Разбор прайса предварительный: товары и цены не публикуются.</p><div id="error" class="error" role="alert"></div><button id="reload" class="secondary" type="button">Обновить статус</button><div id="accounts"></div>
+<p class="notice muted">Подключайте аккаунты и просматривайте полученные сообщения. Разбор прайса предварительный: товары и цены не публикуются.</p><div id="error" class="error" role="alert"></div><button id="reload" class="secondary" type="button">Обновить статус</button><div id="accounts"></div><section class="card"><h2>Товары и цены</h2><p class="muted">Новые позиции требуют вашего одобрения. Публикация каталога пока не подключена.</p><button id="catalogBtn" class="secondary" type="button">Открыть товары и наценки</button><div id="catalog"></div></section>
 <script>
 'use strict';
 const tg=window.Telegram?.WebApp; tg?.ready(); tg?.expand();
@@ -31,14 +31,48 @@ async function loadMessages(slot, container, before=null){
       const p=await api('/accounts/'+slot+'/messages/'+m.id+'/preview');result.replaceChildren();
       result.append(el('p','Кандидатов: '+p.candidates.length+' · проверить: '+p.needs_review.length+' · пропущено: '+p.ignored.length));
       result.append(el('p','Это предварительный разбор, он не создаёт товары и не обновляет цены.','muted'));
-      for(const row of p.candidates.slice(0,50))result.append(el('p',row.model+' — '+row.cost+' ₽'));
+      for(const row of p.candidates.slice(0,50)){
+        const entry=el('div');entry.append(el('p',row.model+' — '+row.cost+' ₽'));
+        entry.append(btn('Добавить предложение',async()=>{
+          let form=el('div');const supplier=el('input');supplier.placeholder='Название реального поставщика';supplier.maxLength=200;
+          form.append(el('p','Проверьте название и стоимость выше. Если предложение этого поставщика уже есть, его цена будет обновлена.','muted'),supplier);
+          form.append(btn('Подтвердить цену на сегодня и добавить',async()=>{
+            const name=supplier.value.trim();if(!name)throw Error('Введите название поставщика');
+            if(!confirm('Цена '+row.cost+' ₽ для «'+row.model+'» подтверждена на сегодня?'))return;
+            const added=await api('/accounts/'+slot+'/messages/'+m.id+'/import-line',{method:'POST',body:JSON.stringify({line:row.line,message_hash:p.message_hash,supplier_name:name,confirmed_today:true})});
+            form.replaceChildren(el('p',added.approved?'Предложение обновлено.':'Добавлено. Товар ожидает одобрения.','status'));
+          }));entry.append(form)
+        },'secondary'));result.append(entry)
+      }
       for(const row of p.needs_review.slice(0,30))result.append(el('p','Проверить: '+row.raw));
       if(p.candidates.length>50 || p.needs_review.length>30)result.append(el('p','Показана часть результатов.','muted'));
     },'secondary'),result)}container.append(details)
   }
   if(data.next_before){let more=btn('Ещё сообщения',async()=>{more.remove();await loadMessages(slot,container,data.next_before)},'secondary');container.append(more)}
 }
+
+async function loadCatalog(){
+  const container=document.getElementById('catalog');container.replaceChildren();
+  const [items,rules]=await Promise.all([api('/products'),api('/markups')]);
+  container.append(el('h2','Наценки'),el('p','Приоритет: товар → модель → категория. Для модели и категории нужно указать точное название.','muted'));
+  const scope=el('select');for(const [value,label] of [['category','Категория'],['model','Модель'],['sku','ID товара']]){const opt=el('option',label);opt.value=value;scope.append(opt)}
+  const target=el('input');target.placeholder='Название категории или модели';const amount=el('input');amount.type='number';amount.min='0';amount.step='0.01';amount.placeholder='Наценка, ₽';
+  scope.onchange=()=>{target.placeholder=scope.value==='category'?'Название категории':scope.value==='model'?'Название модели':'ID товара'};
+  container.append(scope,target,amount,btn('Сохранить наценку',async()=>{if(!target.value.trim()||amount.value==='')throw Error('Укажите название и наценку');await api('/markups',{method:'PUT',body:JSON.stringify({scope:scope.value,target:target.value.trim(),amount:amount.value})});await loadCatalog()}));
+  if(rules.length){const details=el('details');details.append(el('summary','Сохранённые наценки: '+rules.length));for(const r of rules)details.append(el('p',({'category':'Категория','model':'Модель','sku':'Товар'})[r.scope]+': '+r.target+' — '+r.amount+' ₽','muted'));container.append(details)}
+  container.append(el('h2','Товары'));
+  if(!items.length){container.append(el('p','Пока нет товаров. Откройте сообщение поставщика, разберите прайс и добавьте проверенные позиции.','muted'));return}
+  for(const p of items){const details=el('details');details.append(el('summary',p.model));
+    details.append(el('p','ID: '+p.id+' · '+p.category+' · '+(p.approved?'одобрен':'на проверке')+' · '+(p.hidden?'скрыт':'не скрыт'),'muted'));
+    if(p.price)details.append(el('p','Расчётная цена: '+p.price+(p.status==='priced'?' ₽':''),'status'));
+    if(p.sim)details.append(el('p','SIM: '+p.sim,'muted'));
+    details.append(btn(p.approved?'Отменить одобрение':'Одобрить товар',async()=>{await api('/products/'+p.id+'/approve',{method:'PATCH',body:JSON.stringify({value:!p.approved})});await loadCatalog()},'secondary'));
+    details.append(btn(p.hidden?'Показать товар':'Скрыть товар',async()=>{await api('/products/'+p.id+'/hide',{method:'PATCH',body:JSON.stringify({value:!p.hidden})});await loadCatalog()},'secondary'));container.append(details)
+  }
+}
 function watch(slot,panel){if(timers[slot])clearTimeout(timers[slot]);async function poll(){try{let r=await api('/accounts/'+slot+'/login');if(r.state==='connected'){await refresh();return}if(r.state==='password_required'){panel.replaceChildren(el('p','Введите пароль двухэтапной защиты Telegram.','muted'));let input=el('input');input.type='password';input.autocomplete='off';panel.append(input,btn('Подтвердить',async()=>{let password=input.value;input.value='';await api('/accounts/'+slot+'/password',{method:'POST',body:JSON.stringify({password})});panel.replaceChildren(el('p','Проверяем пароль…','muted'));timers[slot]=setTimeout(poll,1500)}));return}if(['failed','expired','password_invalid','already_connected'].includes(r.state)){panel.replaceChildren(el('p',({failed:'Вход не удался. Попробуйте снова.',expired:'QR-код истёк. Создайте новый.',password_invalid:'Неверный пароль. Начните вход заново.',already_connected:'Этот аккаунт уже подключён.'})[r.state],'error'));return}timers[slot]=setTimeout(poll,1500)}catch(e){error.textContent=e.message}}timers[slot]=setTimeout(poll,1500)}
+document.getElementById('catalogBtn').onclick=()=>loadCatalog().catch(e=>{error.textContent=e.message});
 document.getElementById('reload').onclick=()=>refresh().catch(e=>{error.textContent=e.message});
 refresh().catch(e=>{error.textContent=e.message});
 </script></body></html>
+
