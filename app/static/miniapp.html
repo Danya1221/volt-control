@@ -23,7 +23,7 @@ input[type="datetime-local"]{min-inline-size:0}
 <div id="tab-catalog" hidden><section class="card"><h2>Товары</h2><p class="muted">Новые позиции требуют вашего одобрения. Публикация каталога пока не подключена.</p><button id="catalogBtn" class="secondary" type="button">Обновить товары</button><div id="catalog"></div></section></div>
 <div id="tab-pricing" hidden><section class="card"><h2>Обзор цен</h2><p class="muted">Актуальные предложения, московское время и режим расчёта.</p><button id="pricingBtn" class="secondary" type="button">Обновить обзор</button><div id="pricing"></div></section><section class="card"><h2>Акции и ночной резерв</h2><div id="pricingRules"></div></section></div>
 <div id="tab-reviews" hidden><section class="card"><h2>Проверки товаров</h2><p class="muted">Новые товары остаются в очереди до одобрения. Для сверки откройте исходное сообщение в разделе «Поставщики».</p><button id="reviewsBtn" class="secondary" type="button">Обновить очередь</button><div id="reviews"></div></section></div>
-<div id="tab-preview" hidden><section class="card"><h2>Витрина</h2><p class="muted">Публикация каталога и проверенный предпросмотр для покупателей ещё разрабатываются. Сообщения в Telegram не отправляются.</p></section></div>
+<div id="tab-preview" hidden><section class="card"><h2>Группа каталога</h2><p class="muted">Добавь @prostootdushi22_bot администратором в нужную группу и отправь там команду /bindgroup от своего аккаунта владельца VOLT. Или укажи ID либо публичный @username группы ниже.</p><div id="destination"></div></section><section class="card"><h2>Публикация</h2><p class="muted">Публикация каталога и предпросмотр для покупателей ещё разрабатываются. Привязка группы не включает отправку товаров.</p></section></div>
 <script>
 'use strict';
 const tg=window.Telegram?.WebApp; tg?.ready(); tg?.expand();
@@ -126,12 +126,23 @@ async function loadReviews(){
  d.append(el('p','Сверьте товар с исходным сообщением в разделе «Поставщики». Подробная история решений ещё разрабатывается.','muted'));
  d.append(btn('Одобрить товар',async()=>{if(!confirm('Вы сверили товар с источником?'))return;await api('/products/'+p.id+'/approve',{method:'PATCH',body:JSON.stringify({value:true})});await loadReviews();await loadHome()},'secondary'));root.append(d)}
 }
+async function loadDestination(){
+ const data=await api('/destination'), box=document.getElementById('destination');box.replaceChildren();
+ if(data.connected){box.append(el('p','Привязана: '+data.title,'status'),el('p','ID: '+data.chat_id+' · '+(data.is_forum?'Группа с темами':'Группа без тем'),'muted'));
+  box.append(el('p','Права проверены: '+new Date(data.checked_at).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'}),'muted'));
+  if(data.is_forum&&!data.can_manage_topics)box.append(el('p','Для создания тем понадобится право бота «Управление темами».','muted'));
+ }else box.append(el('p','Группа ещё не привязана.','muted'));
+ const chat=el('input');chat.placeholder='-100… или @username группы';chat.value=data.connected?data.chat_id:'';chat.maxLength=128;chat.autocomplete='off';
+ box.append(el('p','Группа для каталога','label'),chat,btn('Проверить и привязать',async()=>{if(!chat.value.trim())throw Error('Укажите ID или @username группы');await api('/destination',{method:'PUT',body:JSON.stringify({chat:chat.value.trim()})});await loadDestination()}));
+ if(data.connected)box.append(btn('Отвязать от VOLT',async()=>{if(!confirm('Отвязать группу от VOLT? Группа и её сообщения останутся в Telegram.'))return;await api('/destination',{method:'DELETE'});await loadDestination()},'secondary'));
+ box.append(el('p','Публикация выключена. После изменения прав бота нажмите «Проверить и привязать» ещё раз.','muted'));
+}
 function showTab(name){
  const allowed=['home','catalog','pricing','suppliers','reviews','preview'];if(!allowed.includes(name))return;
  for(const tab of allowed)document.getElementById('tab-'+tab).hidden=tab!==name;
  document.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===name)));
  error.textContent='';
- const work={home:loadHome,catalog:loadCatalog,pricing:loadPricing,suppliers:refresh,reviews:loadReviews}[name];
+ const work={home:loadHome,catalog:loadCatalog,pricing:loadPricing,suppliers:refresh,reviews:loadReviews,preview:loadDestination}[name];
  if(work)work().catch(e=>{error.textContent=e.message});
 }
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
@@ -143,5 +154,6 @@ document.getElementById('catalogBtn').onclick=()=>loadCatalog().catch(e=>{error.
 document.getElementById('reload').onclick=()=>refresh().catch(e=>{error.textContent=e.message});
 showTab('home');
 </script></body></html>
+
 
 
