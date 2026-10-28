@@ -228,7 +228,7 @@ def hide(product_id:int,body:FlagIn,s:Session=Depends(session)):
 
 @app.put("/admin/markups/{scope}/{target}",dependencies=[Depends(admin)])
 def markup(scope:str,target:str,body:AmountIn,s:Session=Depends(session)):
-    if scope not in ("sku","model","category"):
+    if scope not in ("sku","model","line","category"):
         raise HTTPException(422,"Invalid scope")
     obj=s.scalar(select(Markup).where(Markup.scope==scope,Markup.target==target))
     if obj:obj.amount=body.amount
@@ -249,8 +249,10 @@ def preview_price_list(body: ParsePreviewIn):
 from fastapi.responses import FileResponse
 from pathlib import Path
 from app.miniapp import router as miniapp_router
+from app.pricing import router as pricing_router
 
 app.include_router(miniapp_router)
+app.include_router(pricing_router)
 
 @app.middleware('http')
 async def no_cache_miniapp(request, call_next):
