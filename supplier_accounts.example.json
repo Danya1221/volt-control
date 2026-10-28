@@ -1,0 +1,18 @@
+{
+  "accounts": [
+    {
+      "name": "supplier_account_1",
+      "api_id_env": "TG_API_ID_1",
+      "api_hash_env": "TG_API_HASH_1",
+      "session": "sessions/supplier_account_1",
+      "chats": ["@replace_with_supplier_channel"]
+    },
+    {
+      "name": "supplier_account_2",
+      "api_id_env": "TG_API_ID_2",
+      "api_hash_env": "TG_API_HASH_2",
+      "session": "sessions/supplier_account_2",
+      "chats": ["@replace_with_supplier_channel"]
+    }
+  ]
+}
