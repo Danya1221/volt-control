@@ -78,7 +78,7 @@ async function loadMessages(slot, container, before=null){
     if(m.text){let result=el('div',undefined,'result');details.append(btn('Предварительно разобрать',async()=>{
       const p=await api('/accounts/'+slot+'/messages/'+m.id+'/preview');result.replaceChildren();
       result.append(el('p','Кандидатов: '+p.candidates.length+' · проверить: '+p.needs_review.length+' · пропущено: '+p.ignored.length));
-      result.append(el('p','Это предварительный разбор, он не создаёт товары и не обновляет цены.','muted'));
+      result.append(el('p','Это предварительный разбор, он не создаёт товары и не обновляет цены.','muted'));if(p.hi_android_excluded)result.append(el('p','Android-смартфоны @hi_catalog_bot исключены; айфоны остаются. Неоднозначные позиции остаются на проверке.','muted'));
       for(const row of p.candidates.slice(0,50)){
         const entry=el('div');entry.append(el('p',row.model+' — '+row.cost+' ₽'));
         entry.append(btn('Добавить предложение',async()=>{
