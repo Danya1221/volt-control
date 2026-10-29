@@ -43,7 +43,7 @@ body{max-width:1240px;box-sizing:border-box;padding:20px 16px 48px}
 <div id="tab-catalog" hidden><section class="card"><h2>Товары</h2><p class="muted">Новые позиции требуют вашего одобрения. Публикация каталога пока не подключена.</p><button id="catalogBtn" class="secondary" type="button">Обновить товары</button><div id="catalog"></div></section></div>
 <div id="tab-pricing" hidden><section class="card"><h2>Обзор цен</h2><p class="muted">Актуальные предложения, московское время и режим расчёта.</p><button id="pricingBtn" class="secondary" type="button">Обновить обзор</button><div id="pricing"></div></section><section class="card"><h2>Акции и ночной резерв</h2><div id="pricingRules"></div></section></div>
 <div id="tab-reviews" hidden><section class="card"><h2>Проверки товаров</h2><p class="muted">Новые товары остаются в очереди до одобрения. Для сверки откройте исходное сообщение в разделе «Поставщики».</p><button id="reviewsBtn" class="secondary" type="button">Обновить очередь</button><div id="reviews"></div></section></div>
-<div id="tab-preview" hidden><section class="card"><h2>Привязка чата каталога</h2><p class="muted">Добавь @prostootdushi22_bot администратором в чат. В личном чате с ботом перешли сообщение из нужного чата. Если Telegram не передаст источник, нажми <b>«Выбрать чат»</b> и укажи чат в списке. Поддерживаются чаты с темами.</p><div id="destination" class="destination-form"></div></section><section class="card"><h2>Публикация</h2><p class="muted">Привязка сохраняет чат. Публикация товаров и распределение по темам пока не подключены.</p></section></div>
+<div id="tab-preview" hidden><section class="card"><h2>Привязка чата каталога</h2><p class="muted">Добавь @prostootdushi22_bot администратором в чат. В личном чате с ботом перешли сообщение из нужного чата. Если Telegram не передаст источник, нажми <b>«Выбрать чат»</b> и укажи чат в списке. Поддерживаются чаты с темами.</p><div id="destination" class="destination-form"></div></section><section class="card"><h2>Темы и товары</h2><div id="topicSettings"></div></section><section class="card"><h2>Публикация</h2><p class="muted">Привязка сохраняет чат. Публикация товаров и распределение по темам пока не подключены.</p></section></div>
 <script>
 'use strict';
 const tg=window.Telegram?.WebApp; tg?.ready(); tg?.expand();
@@ -197,7 +197,35 @@ async function loadDestination(){
  box.append(el('p','Или привяжи чат по ID / @username','label'),chat,btn('Проверить и привязать',async()=>{if(!chat.value.trim())throw Error('Укажите ID или @username чата');await api('/destination',{method:'PUT',body:JSON.stringify({chat:chat.value.trim()})});await loadDestination()}));
  if(data.connected)box.append(btn('Отвязать чат',async()=>{if(!confirm('Отвязать чат от VOLT? Сам чат и его сообщения останутся в Telegram.'))return;await api('/destination',{method:'DELETE'});await loadDestination()},'secondary'));
  box.append(el('p','Публикация выключена. После изменения прав бота повтори проверку.','muted'));
+ await loadTopics(data);
 }
+
+async function loadTopics(destination){
+ const box=document.getElementById('topicSettings');box.replaceChildren();
+ if(!destination.connected){box.append(el('p','Сначала привяжи чат каталога.','muted'));return}
+ if(!destination.is_forum){box.append(el('p','Включи темы в привязанном чате Telegram и заново проверь привязку.','muted'));return}
+ box.append(el('p','Загрузи темы и выбери, куда отправлять отдельный товар, бренд, категорию или их сочетание. Правила сохраняются для этого чата.','muted'));
+ box.append(btn('Загрузить темы из Telegram',async()=>{const r=await api('/destination/topics/sync',{method:'POST'});await loadTopics(destination);if(r.incomplete)box.append(el('p','Telegram вернул часть тем. Остальные можно добавить командой в нужной теме.','error'))},'secondary'));
+ box.append(el('p','Для загрузки один подключённый аккаунт должен состоять в этом чате. Если это неудобно: в нужной теме отправь /volttopic Название, затем обнови страницу.','muted'));
+ const data=await api('/destination/topics');
+ if(!data.topics.length){box.append(el('p','Темы пока не добавлены.','muted'));return}
+ const products=await api('/products');
+ const rulesBox=el('div');
+ for(const rule of data.rules){const t=data.topics.find(x=>x.thread_id===rule.thread_id);const row=el('div',undefined,'card');row.append(el('p',(rule.product_id?(productLabel(products.find(p=>p.id===rule.product_id)||{})||'Товар удалён'):[rule.brand,rule.category].filter(Boolean).join(' · '))+' → '+(t?.title||'Тема недоступна')+(t?.closed?' (закрыта или недоступна)':'')));row.append(btn('Удалить правило',async()=>{await api('/destination/routes/'+rule.id,{method:'DELETE'});await loadTopics(destination)},'secondary'));rulesBox.append(row)}
+ if(!data.rules.length)rulesBox.append(el('p','Правил пока нет.','muted'));
+ box.append(rulesBox);
+ const form=el('div',undefined,'form-stack'),product=el('select'),brand=el('select'),category=el('select'),topic=el('select');
+ const brands=uniq(['Apple','Samsung','Xiaomi','Google','Sony','DJI','Insta360','Nintendo','Meta Ray-Ban',...products.map(p=>p.brand),...data.rules.map(r=>r.brand)]);
+ fillSelect(product,products.map(p=>[String(p.id),productLabel(p)]),'Все товары');product.children[0].disabled=false;product.disabled=false;
+ fillSelect(brand,brands.map(x=>[x,x]),'Все бренды');fillSelect(category,uniq([...categoryNames,...products.map(p=>p.category),...data.rules.map(r=>r.category)]).map(x=>[x,x]),'Все категории');brand.children[0].disabled=false;category.children[0].disabled=false;
+ const topicOptions=data.topics.filter(t=>!t.closed);for(const t of topicOptions){const o=el('option',t.title);o.value=String(t.thread_id);topic.append(o)}
+ if(!topicOptions.length){box.append(el('p','Нет открытых тем для выбора.','muted'));return}
+ topic.value=String(topicOptions[0].thread_id);
+ product.onchange=()=>{if(product.value){brand.value='';category.value=''}};brand.onchange=category.onchange=()=>{if(brand.value||category.value)product.value=''};
+ form.append(el('p','Товар','label'),product,el('p','Бренд','label'),brand,el('p','Категория','label'),category,el('p','Тема','label'),topic,el('p','Приоритет: товар → бренд и категория → бренд → категория.','muted'),btn('Сохранить правило',async()=>{if(!product.value&&!brand.value&&!category.value)throw Error('Выберите товар, бренд или категорию');await api('/destination/routes',{method:'PUT',body:JSON.stringify({product_id:Number(product.value)||0,brand:brand.value,category:category.value,thread_id:Number(topic.value)})});await loadTopics(destination)}));box.append(form);
+ box.append(el('p','Правила сохранены для будущей публикации. Автоматическая публикация в темы пока не подключена.','muted'));
+}
+
 function showTab(name){
  const allowed=['home','catalog','pricing','suppliers','reviews','preview'];if(!allowed.includes(name))return;
  for(const tab of allowed)document.getElementById('tab-'+tab).hidden=tab!==name;
