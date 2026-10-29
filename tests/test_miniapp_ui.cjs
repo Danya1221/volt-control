@@ -78,6 +78,21 @@ const firstTest=(async()=>{await new Promise(r=>setImmediate(r));assert.equal(el
   await topicForm.children.find(x=>x.textContent==='Сохранить правило').onclick();
   const topicReq=requests[requests.length-1];assert.equal(topicReq.key,'/destination/routes');assert.equal(topicReq.body.brand,'Apple');assert.equal(topicReq.body.category,'Смартфоны');assert.equal(topicReq.body.thread_id,41);
   console.log('Topic routing selection passed');
+  data['/products']=[{id:77,model:'AirPods 4',brand:'Apple',category:'Наушники',sim:'',approved:false}];
+  data['/product-sources']=[{product_id:77,slot:1,chat_id:'22',message_id:10,line:1,message_hash:'abc',price:'8400',source_at:'2026-10-29T12:00:00Z'}];
+  await vm.runInContext('loadReviews()',context);
+  const review=elements.reviews.children.find(x=>x.tag==='details');assert.match(all(review),/цена в сообщении: 8400/);assert.match(all(review),/не подтверждена/);
+  const sourceForm=review.children.find(x=>x.className==='form-stack');sourceForm.children.find(x=>x.tag==='input').value='Реальный поставщик';
+  await sourceForm.children.find(x=>x.textContent==='Подтвердить цену на сегодня').onclick();
+  const priceReq=requests[requests.length-1];assert.equal(priceReq.key,'/accounts/1/messages/10/import-line');assert.equal(priceReq.body.line,1);assert.equal(priceReq.body.confirmed_today,true);
+  console.log('Incoming product and price review passed');
+  context.fetch=async(url,opts={})=>{const key=url.replace('/miniapp/api','');if(key==='/destination/topics/sync')return {ok:false,json:async()=>({detail:'Проверьте доступ аккаунта к группе'})};return {ok:true,json:async()=>data[key]}};
+  await vm.runInContext('loadTopics(destinationForTest)',context);
+  const syncButton=elements.topicSettings.children.find(x=>x.textContent==='Загрузить темы из Telegram');await syncButton.onclick();
+  assert.equal(syncButton.disabled,false);assert.match(all(elements.topicSettings),/Проверьте доступ аккаунта к группе/);
+  console.log('Topic load failure shown beside button passed');
+
+
 
 
 })().catch(e=>{console.error(e);process.exitCode=1});
