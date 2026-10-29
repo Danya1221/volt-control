@@ -128,13 +128,24 @@ async def monitor_account(config, db):
         if not entities:
             raise NoAccessibleChats()
 
+        async def store_message(chat_id, message, advance=False):
+            persist(db, name, chat_id, message, advance=advance)
+            if config.get('on_message'):
+                try:
+                    await config['on_message'](chat_id, message)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Keep collecting; pending products can be recovered on the next catch-up.
+                    log.error('Could not stage a supplier message (%s)', type(exc).__name__)
+
         @client.on(events.NewMessage(chats=list(entities.values())))
         async def on_new(event):
-            persist(db, name, event.chat_id, event.message, advance=True)
+            await store_message(event.chat_id, event.message, advance=True)
 
         @client.on(events.MessageEdited(chats=list(entities.values())))
         async def on_edit(event):
-            persist(db, name, event.chat_id, event.message)
+            await store_message(event.chat_id, event.message)
 
         for chat_id, entity in entities.items():
             with db() as s:
@@ -142,9 +153,9 @@ async def monitor_account(config, db):
                     ChatCursor.account == name, ChatCursor.chat_id == chat_id))
                 last_id = cursor.last_id if cursor else 0
             async for message in client.iter_messages(entity, min_id=last_id, reverse=True):
-                persist(db, name, chat_id, message, advance=True)
+                await store_message(chat_id, message, advance=True)
             async for message in client.iter_messages(entity, limit=200):
-                persist(db, name, chat_id, message)
+                await store_message(chat_id, message)
         log.info("Telegram collector %s monitoring %s chats", name, len(entities))
         if config.get("on_ready"):
             config["on_ready"]()
