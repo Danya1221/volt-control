@@ -132,7 +132,7 @@ def test_qr_two_factor_and_same_account_rejection(monkeypatch):
 
 def test_message_inbox_is_owner_only_and_scoped_to_connected_account(monkeypatch):
     from datetime import datetime, timezone
-    from app.integrated_collector import SupplierMessage, Base as CollectorBase
+    from app.integrated_collector import SupplierMessage, SupplierSource, Base as CollectorBase
     monkeypatch.setenv('VOLT_MINIAPP_ENABLED', '1')
     monkeypatch.setenv('TG_BOT_TOKEN', 'bot-token')
     monkeypatch.setenv('VOLT_OWNER_TG_ID', '123')
@@ -145,6 +145,7 @@ def test_message_inbox_is_owner_only_and_scoped_to_connected_account(monkeypatch
         db.add_all([
             miniapp.ReaderAccount(slot=1, telegram_id='111', display_name='Reader 1', encrypted_session='x', chats_json='[]'),
             miniapp.ReaderAccount(slot=2, telegram_id='222', display_name='Reader 2', encrypted_session='y', chats_json='[]'),
+            SupplierSource(account='miniapp-111', chat_id=99, is_hi_catalog=False),
             SupplierMessage(account='miniapp-111', chat_id=99, message_id=1, text='iPhone 16 eSIM 60000', seen_at=datetime.now(timezone.utc)),
             SupplierMessage(account='miniapp-222', chat_id=99, message_id=2, text='Samsung Galaxy 2 SIM 70000', seen_at=datetime.now(timezone.utc)),
         ])
@@ -168,7 +169,7 @@ def test_message_inbox_is_owner_only_and_scoped_to_connected_account(monkeypatch
 def test_reviewed_import_and_catalog_controls(monkeypatch):
     from datetime import datetime, timezone
     from sqlalchemy import select
-    from app.integrated_collector import SupplierMessage, Base as CollectorBase
+    from app.integrated_collector import SupplierMessage, SupplierSource, Base as CollectorBase
     from app.main import Product, Supplier, Offer, Markup, today
     monkeypatch.setenv('VOLT_MINIAPP_ENABLED', '1')
     monkeypatch.setenv('TG_BOT_TOKEN', 'bot-token')
@@ -180,6 +181,7 @@ def test_reviewed_import_and_catalog_controls(monkeypatch):
     monkeypatch.setattr(miniapp, 'Sessions', sessions)
     with sessions() as db:
         db.add(miniapp.ReaderAccount(slot=1, telegram_id='111', display_name='Reader', encrypted_session='x', chats_json='[]'))
+        db.add(SupplierSource(account='miniapp-111', chat_id=123, is_hi_catalog=False))
         db.add(SupplierMessage(account='miniapp-111', chat_id=123, message_id=10,
                                text='iPhone 16 eSIM 60000', seen_at=datetime.now(timezone.utc)))
         db.commit()
@@ -347,4 +349,43 @@ def test_reconnect_preserves_chats_and_rejects_different_account(monkeypatch):
         assert restarted == [1]
         assert 'old_session' not in miniapp.attempts[1]
     asyncio.run(scenario())
+    engine.dispose()
+
+
+def test_hi_source_filter_is_enforced_in_preview_and_import(monkeypatch):
+    import hashlib
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from app.integrated_collector import SupplierMessage, SupplierSource, Base as CollectorBase
+    from app.main import Product
+    monkeypatch.setenv('VOLT_MINIAPP_ENABLED', '1')
+    monkeypatch.setenv('TG_BOT_TOKEN', 'bot-token')
+    monkeypatch.setenv('VOLT_OWNER_TG_ID', '123')
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    miniapp.Base.metadata.create_all(engine)
+    CollectorBase.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    monkeypatch.setattr(miniapp, 'Sessions', sessions)
+    text = 'Samsung Galaxy S25 eSIM 70000\niPhone 16 eSIM 60000\nMacBook Air M3 80000\n16 Pro 256 Natural 75000'
+    with sessions() as db:
+        db.add(miniapp.ReaderAccount(slot=1, telegram_id='111', display_name='Reader', encrypted_session='x', chats_json='[]'))
+        db.add_all([SupplierSource(account='miniapp-111', chat_id=1, is_hi_catalog=True),
+                    SupplierSource(account='miniapp-111', chat_id=2, is_hi_catalog=False)])
+        db.add_all([SupplierMessage(account='miniapp-111', chat_id=i, message_id=10, text=text, seen_at=datetime.now(timezone.utc)) for i in (1, 2, 3)])
+        db.commit()
+        ids = {r.chat_id: r.id for r in db.scalars(select(SupplierMessage)).all()}
+    client = TestClient(app)
+    headers = {'X-Telegram-Init-Data': signed()}
+    path = lambda i: f'/miniapp/api/accounts/1/messages/{ids[i]}'
+    preview = client.get(path(1) + '/preview', headers=headers).json()
+    assert preview['hi_android_excluded']
+    assert [x['line'] for x in preview['candidates']] == [2, 3]
+    assert [x['line'] for x in preview['needs_review']] == [4]
+    assert client.get(path(3) + '/preview', headers=headers).status_code == 409
+    payload = {'line': 1, 'message_hash': hashlib.sha256(text.encode()).hexdigest(), 'supplier_name':'supplier', 'confirmed_today':True}
+    assert client.post(path(1) + '/import-line', json=payload, headers=headers).status_code == 422
+    assert client.post(path(3) + '/import-line', json=payload, headers=headers).status_code == 409
+    assert client.post(path(2) + '/import-line', json=payload, headers=headers).status_code == 200
+    with sessions() as db:
+        assert len(db.scalars(select(Product)).all()) == 1
     engine.dispose()
