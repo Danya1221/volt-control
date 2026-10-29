@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.main as main
 from app import miniapp
-from app.integrated_collector import Base as CollectorBase, SupplierMessage
+from app.integrated_collector import Base as CollectorBase, SupplierMessage, SupplierSource
 
 
 def test_import_on_disposable_postgres(monkeypatch):
@@ -28,6 +28,7 @@ def test_import_on_disposable_postgres(monkeypatch):
     try:
         with db_factory() as db:
             db.add(miniapp.ReaderAccount(slot=1, telegram_id='111', display_name='Test', encrypted_session='unused', chats_json='[]'))
+            db.add(SupplierSource(account='miniapp-111', chat_id=12345678901, is_hi_catalog=False))
             db.add(SupplierMessage(account='miniapp-111', chat_id=12345678901, message_id=50,
                                    text='iPhone 16 eSIM 60000', seen_at=datetime.now(timezone.utc)))
             db.commit()

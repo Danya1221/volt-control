@@ -28,7 +28,7 @@ from telethon.sessions import StringSession
 
 from app.main import Base, Sessions, Supplier, Product, Offer, Markup, ProductIn, FlagIn, AmountIn, key_for, today
 from app.main import products as list_products, approve as approve_product, hide as hide_product, markup as set_markup
-from app.integrated_collector import Base as CollectorBase, SupplierMessage, monitor_account, NoAccessibleChats
+from app.integrated_collector import Base as CollectorBase, SupplierMessage, SupplierSource, monitor_account, NoAccessibleChats
 from app.price_parser import parse_lines
 
 log = logging.getLogger(__name__)
@@ -470,6 +470,14 @@ def account_messages(slot: int, before: int | None = None):
                 'next_before': rows[19].id if len(rows) > 20 else None}
 
 
+def source_policy(db, row):
+    source = db.scalar(select(SupplierSource).where(SupplierSource.account == row.account,
+                                                    SupplierSource.chat_id == row.chat_id))
+    if source is None:
+        raise HTTPException(409, 'Источник сообщения ещё не определён. Возобновите мониторинг и попробуйте снова')
+    return bool(source.is_hi_catalog)
+
+
 @router.get('/accounts/{slot}/messages/{message_id}/preview', dependencies=[Depends(owner)])
 def message_preview(slot: int, message_id: int):
     validate_slot(slot)
@@ -484,7 +492,9 @@ def message_preview(slot: int, message_id: int):
             raise HTTPException(404, 'Сообщение не найдено')
         if len(row.text) > 500000:
             raise HTTPException(422, 'Сообщение слишком большое для предварительного разбора')
-        result = parse_lines(row.text)
+        is_hi = source_policy(db, row)
+        result = parse_lines(row.text, exclude_hi_android=is_hi)
+        result['hi_android_excluded'] = is_hi
         result['message_hash'] = hashlib.sha256(row.text.encode('utf-8')).hexdigest()
         return result
 
@@ -517,7 +527,7 @@ def import_line(slot: int, message_id: int, body: ImportLineIn):
         fingerprint = hashlib.sha256(row.text.encode('utf-8')).hexdigest()
         if not hmac.compare_digest(fingerprint, body.message_hash):
             raise HTTPException(409, 'Сообщение изменилось. Разберите его заново')
-        candidate = next((c for c in parse_lines(row.text)['candidates'] if c['line'] == body.line), None)
+        candidate = next((c for c in parse_lines(row.text, exclude_hi_android=source_policy(db, row))['candidates'] if c['line'] == body.line), None)
         if not candidate:
             raise HTTPException(422, 'Эта строка требует дополнительной проверки и не может быть добавлена')
         cost = Decimal(candidate['cost'])

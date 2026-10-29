@@ -31,6 +31,7 @@ def test_inaccessible_chat_does_not_stop_other_chat(monkeypatch):
     def db():
         yield SimpleNamespace(scalar=lambda query: None)
     monkeypatch.setattr(collector, 'TelegramClient', FakeClient)
+    monkeypatch.setattr(collector, 'record_source', lambda *args: None)
     checked, ready = [], []
     asyncio.run(collector.monitor_account({'name':'account', 'session_string':'', 'api_id':1,
         'api_hash':'x', 'chats':['@missing', '@working'],
@@ -58,3 +59,19 @@ def test_reader_exposes_safe_error_category(monkeypatch):
     assert 'sensitive' not in repr(miniapp.worker_details[1])
     miniapp.worker_states.clear()
     miniapp.worker_details.clear()
+
+
+def test_source_identity_is_persisted_for_username_and_numeric_peer():
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+    engine = create_engine('sqlite://')
+    collector.Base.metadata.create_all(engine)
+    db = sessionmaker(engine)
+    collector.record_source(db, 'reader-1', 101, '@HI_catalog_bot', SimpleNamespace(username='hi_catalog_bot', usernames=[]))
+    collector.record_source(db, 'reader-1', 101, 101, SimpleNamespace(username='renamed_bot', usernames=[]))
+    collector.record_source(db, 'reader-2', 101, 101, SimpleNamespace(username='hi_catalog_bot', usernames=[]))
+    collector.record_source(db, 'reader-1', 102, '@another_bot', SimpleNamespace(username='another_bot', usernames=[]))
+    with db() as session:
+        sources = {(r.account, r.chat_id): r.is_hi_catalog for r in session.scalars(select(collector.SupplierSource))}
+    assert sources == {('reader-1', 101): True, ('reader-2', 101): True, ('reader-1', 102): False}
+    engine.dispose()
