@@ -2,6 +2,7 @@
 import hashlib
 import os
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -10,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.main as main
 from app import miniapp
-from app.integrated_collector import Base as CollectorBase, SupplierMessage, SupplierSource
+from app.integrated_collector import Base as CollectorBase, SupplierMessage, SupplierSource, persist
 
 
 def test_import_on_disposable_postgres(monkeypatch):
@@ -33,6 +34,16 @@ def test_import_on_disposable_postgres(monkeypatch):
                                    text='iPhone 16 eSIM 60000', seen_at=datetime.now(timezone.utc)))
             db.commit()
             message_id = db.scalar(select(SupplierMessage.id))
+        now = datetime.now(timezone.utc)
+        incoming = SimpleNamespace(id=51, raw_text='AirPods 4 - 8400', date=now, edit_date=None, out=False)
+        persist(db_factory, 'miniapp-111', 12345678901, incoming)
+        miniapp.stage_incoming_product('miniapp-111', 12345678901, incoming, now)
+        miniapp.stage_incoming_product('miniapp-111', 12345678901, incoming, now)
+        with db_factory() as db:
+            staged = db.scalars(select(miniapp.IncomingProduct)).all()
+            assert len(staged) == 1
+            assert not db.get(main.Product, staged[0].product_id).approved
+            assert db.scalars(select(main.Offer)).all() == []
         content_hash = hashlib.sha256(b'iPhone 16 eSIM 60000').hexdigest()
         result = miniapp.import_line(1, message_id, miniapp.ImportLineIn(
             line=1, message_hash=content_hash, supplier_name='Local test supplier', confirmed_today=True))

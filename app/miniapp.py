@@ -9,9 +9,10 @@ import logging
 import os
 import time
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from urllib.parse import parse_qsl
+from zoneinfo import ZoneInfo
 
 import qrcode
 from aiogram import Bot
@@ -111,6 +112,88 @@ class OfferImport(Base):
     message_hash: Mapped[str] = mapped_column(String(64))
     cost: Mapped[Decimal] = mapped_column(Numeric(14, 2))
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class IncomingProduct(Base):
+    """An unconfirmed price from an actual captured supplier message."""
+    __tablename__ = 'incoming_product_sources'
+    __table_args__ = (UniqueConstraint('account', 'chat_id', 'message_id', 'line', 'message_hash'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey('products.id'))
+    account: Mapped[str] = mapped_column(String(100))
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+    stored_message_id: Mapped[int] = mapped_column(Integer)
+    line: Mapped[int] = mapped_column(Integer)
+    message_hash: Mapped[str] = mapped_column(String(64))
+    source_price: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    source_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+AUTO_CATEGORIES = {'Смартфоны', 'Планшеты', 'Ноутбуки', 'Умные часы', 'Наушники'}
+
+
+def stage_incoming_product(account, chat_id, message, now=None):
+    """Add only recognised current-day incoming products to the review queue.
+
+    Prices remain unconfirmed and no supplier or offer is created here.
+    """
+    if getattr(message, 'out', False) or not getattr(message, 'date', None):
+        return
+    stamp = getattr(message, 'edit_date', None) or message.date
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if stamp > now + timedelta(minutes=5) or stamp.astimezone(ZoneInfo('Europe/Moscow')).date() != now.astimezone(ZoneInfo('Europe/Moscow')).date():
+        return
+    raw_text = message.raw_text or ''
+    if not raw_text or len(raw_text) > 500000:
+        return
+    fingerprint = hashlib.sha256(raw_text.encode('utf-8')).hexdigest()
+    with Sessions() as db:
+        source = db.scalar(select(SupplierSource).where(SupplierSource.account == account, SupplierSource.chat_id == chat_id))
+        row = db.scalar(select(SupplierMessage).where(SupplierMessage.account == account,
+                                                       SupplierMessage.chat_id == chat_id,
+                                                       SupplierMessage.message_id == message.id))
+        if not source or not row or not hmac.compare_digest(hashlib.sha256(row.text.encode('utf-8')).hexdigest(), fingerprint):
+            return
+        parsed = parse_lines(raw_text, exclude_hi_android=bool(source.is_hi_catalog))
+        for candidate in parsed['candidates']:
+            if candidate['category'] not in AUTO_CATEGORIES or len(candidate['model']) > 200:
+                continue
+            cost = Decimal(candidate['cost'])
+            if cost <= 0 or cost > Decimal('999999999999.99'):
+                continue
+            item = ProductIn(brand=candidate['brand'], model=candidate['model'],
+                             category=candidate['category'], sim=candidate['sim'])
+            sku = key_for(item)
+            if len(sku) > 600:
+                continue
+            existing = db.scalar(select(IncomingProduct).where(IncomingProduct.account == account,
+                IncomingProduct.chat_id == chat_id, IncomingProduct.message_id == message.id,
+                IncomingProduct.line == candidate['line'], IncomingProduct.message_hash == fingerprint))
+            if existing:
+                continue
+            for attempt in range(2):
+                try:
+                    with db.begin_nested():
+                        product = db.scalar(select(Product).where(Product.sku_key == sku))
+                        if product is None:
+                            product = Product(sku_key=sku, **item.model_dump(), approved=False, hidden=False)
+                            db.add(product)
+                            db.flush()
+                        db.add(IncomingProduct(product_id=product.id, account=account, chat_id=chat_id,
+                            message_id=message.id, stored_message_id=row.id, line=candidate['line'],
+                            message_hash=fingerprint, source_price=cost, source_at=stamp))
+                        db.flush()
+                    break
+                except IntegrityError:
+                    if attempt:
+                        raise
+            # Commit each entry so retries cannot discard earlier valid products.
+            db.commit()
 
 
 class CatalogDestination(Base):
@@ -310,13 +393,16 @@ async def sync_catalog_topics():
             chat_id = destination.chat_id
         clients = [c for c in worker_clients.values() if c and c.is_connected()]
         if not clients:
-            raise HTTPException(409, 'Нет работающего аккаунта для чтения тем. Можно добавить тему командой в группе.')
+            raise HTTPException(409, 'Нет подключённого работающего аккаунта. Проверьте статус аккаунта в разделе «Поставщики».')
         result = None
         for client in clients:
             try:
                 async def fetch():
-                    await client.get_dialogs()
-                    peer = await client.get_input_entity(chat_id)
+                    try:
+                        peer = await client.get_input_entity(chat_id)
+                    except ValueError:
+                        await client.get_dialogs()
+                        peer = await client.get_input_entity(chat_id)
                     return await client(functions.messages.GetForumTopicsRequest(peer=peer, offset_date=None, offset_id=0, offset_topic=0, limit=100))
                 result = await asyncio.wait_for(fetch(), timeout=25)
                 break
@@ -325,7 +411,7 @@ async def sync_catalog_topics():
             except Exception as exc:
                 log.info('Could not read forum topics with reader (%s)', type(exc).__name__)
         if result is None:
-            raise HTTPException(422, 'Подключённый аккаунт не смог открыть темы. Добавьте его в группу или используйте команду в теме.')
+            raise HTTPException(422, 'Не удалось загрузить темы. Проверьте, что подключённый аккаунт Telegram состоит в привязанной группе, и повторите.')
         count = 0
         with Sessions() as db:
             destination = current_forum(db)
@@ -463,9 +549,13 @@ async def reader_worker(slot):
                 worker_details[slot]['inaccessible_chats'] = inaccessible
             def ready():
                 worker_states[slot] = 'partial' if worker_details[slot].get('inaccessible_chats') else 'monitoring'
-            await guarded_monitor(slot, data, {'name': f"miniapp-{data['telegram_id']}", 'chats': data['chats'],
+            account_key = f"miniapp-{data['telegram_id']}"
+            async def stage(chat_id, message):
+                await asyncio.to_thread(stage_incoming_product, account_key, chat_id, message)
+            await guarded_monitor(slot, data, {'name': account_key, 'chats': data['chats'],
                                    'session_string': session_string, 'api_id': api_id,
                                    'api_hash': api_hash, 'on_chats': chats_checked, 'on_ready': ready,
+                                   'on_message': stage,
                                    'on_client': lambda client: worker_clients.__setitem__(slot, client) if client else worker_clients.pop(slot, None)})
             worker_states[slot] = 'disconnected'
         except asyncio.CancelledError:
@@ -773,6 +863,34 @@ def import_line(slot: int, message_id: int, body: ImportLineIn):
 def mini_products():
     with Sessions() as db:
         return list_products(db)
+
+
+@router.get('/product-sources', dependencies=[Depends(owner)])
+def product_sources():
+    with Sessions() as db:
+        accounts = {f'miniapp-{a.telegram_id}': a.slot for a in db.scalars(select(ReaderAccount)).all()}
+        confirmed = select(OfferImport.id).where(OfferImport.product_id == IncomingProduct.product_id,
+                          OfferImport.account == IncomingProduct.account, OfferImport.chat_id == IncomingProduct.chat_id,
+                          OfferImport.message_id == IncomingProduct.message_id, OfferImport.line == IncomingProduct.line,
+                          OfferImport.message_hash == IncomingProduct.message_hash).exists()
+        records = db.execute(select(IncomingProduct, SupplierMessage).join(SupplierMessage,
+                             SupplierMessage.id == IncomingProduct.stored_message_id)
+                             .where(~confirmed)
+                             .order_by(IncomingProduct.source_at.desc(), IncomingProduct.id.desc()).limit(5000)).all()
+        output = []
+        per_product = {}
+        for source, message in records:
+            slot = accounts.get(source.account)
+            if not slot or per_product.get(source.product_id, 0) >= 5:
+                continue
+            if not hmac.compare_digest(hashlib.sha256(message.text.encode('utf-8')).hexdigest(), source.message_hash):
+                continue
+            per_product[source.product_id] = per_product.get(source.product_id, 0) + 1
+            output.append({'product_id': source.product_id, 'slot': slot, 'chat_id': str(source.chat_id),
+                           'message_id': source.stored_message_id, 'line': source.line,
+                           'message_hash': source.message_hash, 'price': str(source.source_price),
+                           'source_at': source.source_at.isoformat()})
+        return output
 
 
 @router.patch('/products/{product_id}/approve', dependencies=[Depends(owner)])

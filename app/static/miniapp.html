@@ -180,13 +180,21 @@ async function loadHome(){
  }
 }
 async function loadReviews(){
- const items=await api('/products'), root=document.getElementById('reviews');root.replaceChildren();
- const pending=items.filter(p=>!p.approved);
+ const [items,sources]=await Promise.all([api('/products'),api('/product-sources')]), root=document.getElementById('reviews');root.replaceChildren();
+ const pending=items.filter(p=>!p.approved||sources.some(s=>s.product_id===p.id));
  if(!pending.length){root.append(el('p','Очередь пуста.','muted'));return}
+ root.append(el('p','Новые распознанные товары добавляются на проверку. Цены из сообщений не подтверждены и не используются автоматически.','muted'));
  for(const p of pending){const d=el('details');d.append(el('summary',p.model),el('p','Категория: '+p.category+' · SIM: '+(p.sim||'не указана'),'muted'));
- d.append(el('p','Сверьте товар с исходным сообщением в разделе «Поставщики». Подробная история решений ещё разрабатывается.','muted'));
- d.append(btn('Одобрить товар',async()=>{if(!confirm('Вы сверили товар с источником?'))return;await api('/products/'+p.id+'/approve',{method:'PATCH',body:JSON.stringify({value:true})});await loadReviews();await loadHome()},'secondary'));root.append(d)}
+ const found=sources.filter(s=>s.product_id===p.id);
+ if(!found.length)d.append(el('p','Сверьте товар с исходным сообщением в разделе «Поставщики».','muted'));
+ for(const source of found){const form=el('div',undefined,'form-stack');const stamp=new Date(source.source_at).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'});
+  form.append(el('p','Аккаунт '+source.slot+' · чат '+source.chat_id+' · сообщение: '+stamp+' МСК · цена в сообщении: '+source.price+' ₽ (не подтверждена)','muted'));
+  const name=el('input');name.placeholder='Название реального поставщика';name.maxLength=200;
+  form.append(name,btn('Подтвердить цену на сегодня',async()=>{const supplier=name.value.trim();if(!supplier)throw Error('Введите название поставщика');if(!confirm('Вы проверили, что цена '+source.price+' ₽ для «'+p.model+'» актуальна сегодня?'))return;await api('/accounts/'+source.slot+'/messages/'+source.message_id+'/import-line',{method:'POST',body:JSON.stringify({line:source.line,message_hash:source.message_hash,supplier_name:supplier,confirmed_today:true})});await loadReviews();await loadHome()}));d.append(form)
+ }
+ if(!p.approved)d.append(btn('Одобрить товар',async()=>{if(!confirm('Вы сверили товар с источником?'))return;await api('/products/'+p.id+'/approve',{method:'PATCH',body:JSON.stringify({value:true})});await loadReviews();await loadHome()},'secondary'));root.append(d)}
 }
+
 async function loadDestination(){
  const data=await api('/destination'), box=document.getElementById('destination');box.replaceChildren();
  if(data.connected){box.append(el('p','Привязан: '+data.title,'status'),el('p',data.is_forum?'Чат с темами':'Чат без тем','muted'));
@@ -205,8 +213,9 @@ async function loadTopics(destination){
  if(!destination.connected){box.append(el('p','Сначала привяжи чат каталога.','muted'));return}
  if(!destination.is_forum){box.append(el('p','Включи темы в привязанном чате Telegram и заново проверь привязку.','muted'));return}
  box.append(el('p','Загрузи темы и выбери, куда отправлять отдельный товар, бренд, категорию или их сочетание. Правила сохраняются для этого чата.','muted'));
- box.append(btn('Загрузить темы из Telegram',async()=>{const r=await api('/destination/topics/sync',{method:'POST'});await loadTopics(destination);if(r.incomplete)box.append(el('p','Telegram вернул часть тем. Остальные можно добавить командой в нужной теме.','error'))},'secondary'));
- box.append(el('p','Для загрузки один подключённый аккаунт должен состоять в этом чате. Если это неудобно: в нужной теме отправь /volttopic Название, затем обнови страницу.','muted'));
+ const topicStatus=el('p','','muted');
+ box.append(btn('Загрузить темы из Telegram',async()=>{topicStatus.className='muted';topicStatus.textContent='Загружаем темы…';try{const r=await api('/destination/topics/sync',{method:'POST'});await loadTopics(destination);const status=box.querySelector('.topic-load-status');if(status){status.className='topic-load-status '+(r.incomplete?'error':'status');status.textContent=r.incomplete?'Загружена только часть тем.':'Тем загружено: '+r.loaded_count}}catch(e){topicStatus.className='topic-load-status error';topicStatus.textContent=e.message}},'secondary'));topicStatus.className='topic-load-status muted';box.append(topicStatus);
+ box.append(el('p','Чтобы выбрать темы здесь, подключённый аккаунт Telegram должен состоять в привязанном чате и отслеживать поставщиков. Права администратора бота проверяются отдельно.','muted'));
  const data=await api('/destination/topics');
  if(!data.topics.length){box.append(el('p','Темы пока не добавлены.','muted'));return}
  const products=await api('/products');
