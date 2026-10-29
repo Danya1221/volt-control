@@ -122,6 +122,29 @@ async def accept_selected_chat(message, owner_id):
     await message.answer('Чат «' + result['title'] + '» привязан. Публикация пока выключена.', reply_markup=ReplyKeyboardRemove())
 
 
+async def register_topic_command(message, owner_id):
+    if not is_owner(message, owner_id):
+        return
+    if message.chat.type != 'supergroup' or not getattr(message.chat, 'is_forum', False):
+        await message.answer('Открой нужную тему привязанной группы и отправь команду там.')
+        return
+    if os.getenv('VOLT_MINIAPP_ENABLED') != '1':
+        await message.answer('Сначала включи Mini App.')
+        return
+    thread_id = getattr(message, 'message_thread_id', None) or 1
+    name = (message.text or '').partition(' ')[2].strip()[:255]
+    if not name:
+        await message.answer('Напиши название после команды, например: /volttopic Наушники')
+        return
+    from app.miniapp import register_catalog_topic
+    try:
+        await register_catalog_topic(message.chat.id, thread_id, name, message.bot)
+    except HTTPException as exc:
+        await message.answer(str(exc.detail))
+        return
+    await message.answer('Тема «' + name + '» добавлена в настройки VOLT. Выбери её для категории или бренда в Mini App.')
+
+
 def create_dispatcher(owner_id):
     dp = Dispatcher()
 
@@ -152,6 +175,10 @@ def create_dispatcher(owner_id):
     @dp.message(Command('bindgroup'))
     async def bindgroup(message: Message):
         await bind_chat_command(message, owner_id)
+
+    @dp.message(Command('volttopic'))
+    async def volttopic(message: Message):
+        await register_topic_command(message, owner_id)
 
     @dp.message(Command('connectgroup'))
     async def connectgroup(message: Message):
