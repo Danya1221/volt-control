@@ -299,3 +299,52 @@ def test_reader_upgrade_pauses_until_owner_resumes(monkeypatch):
     assert miniapp.reader_enabled(1)
     assert calls == [1]
     engine.dispose()
+
+
+def test_reconnect_preserves_chats_and_rejects_different_account(monkeypatch):
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    miniapp.Base.metadata.create_all(engine)
+    db_factory = sessionmaker(engine)
+    monkeypatch.setattr(miniapp, 'Sessions', db_factory)
+    monkeypatch.setenv('TG_API_ID', '12345')
+    monkeypatch.setenv('TG_API_HASH', 'hash')
+    key = Fernet.generate_key()
+    monkeypatch.setenv('VOLT_SESSION_ENCRYPTION_KEY', key.decode())
+    with db_factory() as db:
+        db.add(miniapp.ReaderAccount(slot=1, telegram_id='456', display_name='Old', encrypted_session='old', chats_json='["@supplier"]'))
+        db.add(miniapp.ReaderSwitch(slot=1, enabled=True))
+        db.commit()
+    class QR:
+        url = 'tg://login?token=fake'
+        async def wait(self): await asyncio.sleep(0)
+    class Session:
+        def save(self): return 'new-secret'
+    class Client:
+        user_id = 999
+        def __init__(self, *args): self.session = Session()
+        async def connect(self): pass
+        async def disconnect(self): pass
+        async def qr_login(self): return QR()
+        async def get_me(self): return type('User', (), {'id': Client.user_id, 'first_name': 'Name', 'bot': False})()
+    monkeypatch.setattr(miniapp, 'TelegramClient', Client)
+    restarted = []
+    async def restart(slot): restarted.append(slot)
+    monkeypatch.setattr(miniapp, 'restart_worker', restart)
+    async def scenario():
+        await miniapp.reconnect(1)
+        await miniapp.attempts[1]['task']
+        assert miniapp.attempts[1]['state'] == 'wrong_account'
+        assert miniapp.saved(1)['session'] == 'old'
+        assert not restarted
+        Client.user_id = 456
+        await miniapp.reconnect(1)
+        await miniapp.attempts[1]['task']
+        data = miniapp.saved(1)
+        assert miniapp.attempts[1]['state'] == 'connected'
+        assert data['chats'] == ['@supplier']
+        assert Fernet(key).decrypt(data['session'].encode()) == b'new-secret'
+        assert miniapp.reader_enabled(1)
+        assert restarted == [1]
+        assert 'old_session' not in miniapp.attempts[1]
+    asyncio.run(scenario())
+    engine.dispose()

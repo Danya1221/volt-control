@@ -373,14 +373,36 @@ async def complete_login(slot, attempt, qr):
         encrypted = cipher.encrypt(attempt['client'].session.save().encode()).decode()
         # Disconnect before the monitor opens the same session.
         await attempt['client'].disconnect()
-        with Sessions() as db:
-            if db.get(ReaderAccount, slot) or db.scalar(select(ReaderAccount).where(ReaderAccount.telegram_id == str(me.id))):
-                attempt['state'] = 'already_connected'
-                return
-            db.add(ReaderAccount(slot=slot, telegram_id=str(me.id),
-                                 display_name=(me.first_name or 'Telegram')[:200],
-                                 encrypted_session=encrypted, chats_json='[]'))
-            db.commit()
+        expected_id = attempt.get('expected_id')
+        if expected_id and str(me.id) != expected_id:
+            attempt['state'] = 'wrong_account'
+            return
+        async with locks[slot]:
+            if expected_id:
+                current = saved(slot)
+                if not current or current['telegram_id'] != expected_id or current['session'] != attempt['old_session']:
+                    attempt['state'] = 'failed'
+                    return
+                # Stop the old session before replacing it; retain chats and account identity.
+                await stop_worker(slot)
+                with Sessions() as db:
+                    row = db.get(ReaderAccount, slot)
+                    if not row or row.telegram_id != expected_id or row.encrypted_session != attempt['old_session']:
+                        attempt['state'] = 'failed'
+                        return
+                    row.encrypted_session = encrypted
+                    row.display_name = (me.first_name or 'Telegram')[:200]
+                    db.commit()
+                await restart_worker(slot)
+            else:
+                with Sessions() as db:
+                    if db.get(ReaderAccount, slot) or db.scalar(select(ReaderAccount).where(ReaderAccount.telegram_id == str(me.id))):
+                        attempt['state'] = 'already_connected'
+                        return
+                    db.add(ReaderAccount(slot=slot, telegram_id=str(me.id),
+                                         display_name=(me.first_name or 'Telegram')[:200],
+                                         encrypted_session=encrypted, chats_json='[]'))
+                    db.commit()
         attempt['state'] = 'connected'
     except asyncio.CancelledError:
         raise
@@ -392,6 +414,7 @@ async def complete_login(slot, attempt, qr):
     finally:
         await attempt['client'].disconnect()
         attempt.pop('qr_image', None)
+        attempt.pop('old_session', None)
 
 
 @router.get('/accounts', dependencies=[Depends(owner)])
@@ -576,12 +599,14 @@ def mini_set_markup(body: MiniMarkupIn):
         return set_markup(body.scope, body.target, AmountIn(amount=body.amount), db)
 
 
-@router.post('/accounts/{slot}/login', dependencies=[Depends(owner)])
-async def login(slot: int):
+async def begin_login(slot: int, reconnect: bool = False):
     validate_slot(slot)
     async with locks[slot]:
-        if saved(slot):
-            raise HTTPException(409, 'Сначала отключите существующий аккаунт')
+        existing = saved(slot)
+        if reconnect and not existing:
+            raise HTTPException(404, 'Сначала подключите аккаунт')
+        if not reconnect and existing:
+            raise HTTPException(409, 'Аккаунт уже подключён')
         await cancel_attempt(slot)
         api_id, api_hash, _ = settings()
         client = TelegramClient(StringSession(), api_id, api_hash)
@@ -592,6 +617,8 @@ async def login(slot: int):
             qrcode.make(qr.url).save(out, format='PNG')
             attempt = {'client': client, 'state': 'waiting', 'password': asyncio.Queue(maxsize=1),
                        'qr_image': base64.b64encode(out.getvalue()).decode()}
+            if reconnect:
+                attempt.update(expected_id=existing['telegram_id'], old_session=existing['session'])
             attempts[slot] = attempt
             attempt['task'] = asyncio.create_task(complete_login(slot, attempt, qr))
             await asyncio.sleep(0)  # Install Telethon's login-token handler before returning the QR.
@@ -599,6 +626,16 @@ async def login(slot: int):
         except Exception:
             await client.disconnect()
             raise HTTPException(502, 'Не удалось начать вход в Telegram') from None
+
+
+@router.post('/accounts/{slot}/login', dependencies=[Depends(owner)])
+async def login(slot: int):
+    return await begin_login(slot)
+
+
+@router.post('/accounts/{slot}/reconnect', dependencies=[Depends(owner)])
+async def reconnect(slot: int):
+    return await begin_login(slot, reconnect=True)
 
 
 @router.get('/accounts/{slot}/login', dependencies=[Depends(owner)])
