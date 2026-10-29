@@ -28,7 +28,7 @@ from telethon.sessions import StringSession
 
 from app.main import Base, Sessions, Supplier, Product, Offer, Markup, ProductIn, FlagIn, AmountIn, key_for, today
 from app.main import products as list_products, approve as approve_product, hide as hide_product, markup as set_markup
-from app.integrated_collector import Base as CollectorBase, SupplierMessage, monitor_account
+from app.integrated_collector import Base as CollectorBase, SupplierMessage, monitor_account, NoAccessibleChats
 from app.price_parser import parse_lines
 
 log = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ router = APIRouter(prefix='/miniapp/api', dependencies=[])
 attempts = {}
 workers = {}
 worker_states = {}
+worker_details = {}
 locks = {1: asyncio.Lock(), 2: asyncio.Lock()}
 destination_lock = asyncio.Lock()
 
@@ -209,15 +210,36 @@ async def reader_worker(slot):
             api_id, api_hash, cipher = settings()
             session_string = cipher.decrypt(data['session'].encode()).decode()
             worker_states[slot] = 'connecting'
+            worker_details[slot] = {}
+            def chats_checked(inaccessible):
+                worker_details[slot]['inaccessible_chats'] = inaccessible
+            def ready():
+                worker_states[slot] = 'partial' if worker_details[slot].get('inaccessible_chats') else 'monitoring'
             await monitor_account({'name': f"miniapp-{data['telegram_id']}", 'chats': data['chats'],
                                    'session_string': session_string, 'api_id': api_id,
-                                   'api_hash': api_hash, 'on_ready': lambda: worker_states.__setitem__(slot, 'monitoring')}, Sessions)
+                                   'api_hash': api_hash, 'on_chats': chats_checked, 'on_ready': ready}, Sessions)
             worker_states[slot] = 'disconnected'
         except asyncio.CancelledError:
             raise
-        except Exception:
-            # No exception text: it can contain sensitive account or chat data.
-            log.error('Reader slot %s failed; retrying in 30 seconds', slot)
+        except Exception as exc:
+            # Only safe classifications are exposed; exception text may contain secrets.
+            from telethon.errors import FloodWaitError, AuthKeyError, SessionRevokedError
+            from sqlalchemy.exc import SQLAlchemyError
+            if isinstance(exc, NoAccessibleChats):
+                reason = 'chats_unavailable'
+            elif isinstance(exc, FloodWaitError):
+                reason = 'telegram_limit'
+            elif isinstance(exc, (AuthKeyError, SessionRevokedError)):
+                reason = 'session_invalid'
+            elif isinstance(exc, SQLAlchemyError):
+                reason = 'database'
+            elif isinstance(exc, (ConnectionError, OSError, asyncio.TimeoutError)):
+                reason = 'network'
+            else:
+                reason = 'unknown'
+            worker_details.setdefault(slot, {})['reason'] = reason
+            worker_details[slot]['error_type'] = type(exc).__name__[:80]
+            log.error('Reader slot %s failed (%s); retrying in 30 seconds', slot, type(exc).__name__)
             worker_states[slot] = 'retrying'
         await asyncio.sleep(30)
 
@@ -229,6 +251,7 @@ async def stop_worker(slot):
         with suppress(asyncio.CancelledError):
             await task
     worker_states[slot] = 'not_configured'
+    worker_details.pop(slot, None)
 
 
 async def restart_worker(slot):
@@ -322,6 +345,7 @@ async def accounts():
         row = saved(slot)
         result.append({'slot': slot, 'connected': bool(row), 'name': row['name'] if row else None,
                        'chats': row['chats'] if row else [], 'monitor': worker_states.get(slot, 'not_configured'),
+                       'monitor_details': worker_details.get(slot, {}),
                        'login': attempts.get(slot, {}).get('state', 'idle')})
     return result
 
@@ -556,6 +580,7 @@ async def disconnect(slot: int):
                 db.delete(row)
                 db.commit()
     return {'ok': True}
+
 
 
 
