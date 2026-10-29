@@ -504,6 +504,7 @@ class ImportLineIn(BaseModel):
     message_hash: str = Field(pattern=r'^[a-f0-9]{64}$')
     supplier_name: str = Field(min_length=1, max_length=200)
     confirmed_today: bool
+    confirmed_iphone: bool = False
 
 
 @router.post('/accounts/{slot}/messages/{message_id}/import-line', dependencies=[Depends(owner)])
@@ -527,7 +528,11 @@ def import_line(slot: int, message_id: int, body: ImportLineIn):
         fingerprint = hashlib.sha256(row.text.encode('utf-8')).hexdigest()
         if not hmac.compare_digest(fingerprint, body.message_hash):
             raise HTTPException(409, 'Сообщение изменилось. Разберите его заново')
-        candidate = next((c for c in parse_lines(row.text, exclude_hi_android=source_policy(db, row))['candidates'] if c['line'] == body.line), None)
+        parsed = parse_lines(row.text, exclude_hi_android=source_policy(db, row))
+        candidate = next((c for c in parsed['candidates'] if c['line'] == body.line), None)
+        if candidate is None and body.confirmed_iphone:
+            candidate = next((r['possible_iphone'] for r in parsed['needs_review']
+                              if r['line'] == body.line and r.get('possible_iphone')), None)
         if not candidate:
             raise HTTPException(422, 'Эта строка требует дополнительной проверки и не может быть добавлена')
         cost = Decimal(candidate['cost'])
