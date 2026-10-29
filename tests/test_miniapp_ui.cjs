@@ -16,4 +16,33 @@ const code=fs.readFileSync('app/static/miniapp.html','utf8').split('<script>').p
 const context={document:doc,window:{Telegram:{WebApp:{initData:'test',ready(){},expand(){}}}},fetch:async url=>{let key=url.replace('/miniapp/api','');if(!(key in data))throw Error('Unexpected '+key);return {ok:true,json:async()=>data[key]}},console,setTimeout,clearTimeout,confirm:()=>false,Date,Map,encodeURIComponent};
 vm.createContext(context);vm.runInContext(code,context);
 const all=e=>String(e.textContent)+' '+e.children.map(all).join(' ');
-(async()=>{await new Promise(r=>setImmediate(r));assert.equal(elements['tab-home'].hidden,false);assert.equal(elements['tab-catalog'].hidden,true);assert.match(all(elements.metrics),/Товаров  *1/);await vm.runInContext('loadCatalog()',context);let txt=all(elements.catalog);assert.match(txt,/Расчётная цена: 90/);assert.doesNotMatch(txt,/Расчётная цена: 70/);vm.runInContext("showTab('preview')",context);assert.equal(elements['tab-preview'].hidden,false);assert.equal(elements['tab-home'].hidden,true);console.log('UI navigation and authoritative price passed');})().catch(e=>{console.error(e);process.exit(1)});
+const firstTest=(async()=>{await new Promise(r=>setImmediate(r));assert.equal(elements['tab-home'].hidden,false);assert.equal(elements['tab-catalog'].hidden,true);assert.match(all(elements.metrics),/Товаров  *1/);await vm.runInContext('loadCatalog()',context);let txt=all(elements.catalog);assert.match(txt,/Расчётная цена: 90/);assert.doesNotMatch(txt,/Расчётная цена: 70/);vm.runInContext("showTab('preview')",context);assert.equal(elements['tab-preview'].hidden,false);assert.equal(elements['tab-home'].hidden,true);console.log('UI navigation and authoritative price passed');})().catch(e=>{console.error(e);process.exit(1)});
+
+
+(async()=>{
+  await firstTest;
+  const requests=[];
+  const item={id:42,model:'iPhone 17 Pro',category:'Смартфоны',memory:'256 GB',color:'Black',sim:'eSIM',approved:true,hidden:false};
+  data['/products']=[item];
+  data['/pricing/overview']={mode:'day',moscow_time:'2026-10-29T12:00:00+03:00',total:1,priced:1,review:0,items:[]};
+  data['/pricing/rules']={markups:[],reserves:[],promotions:[]};
+  context.fetch=async(url,opts={})=>{const key=url.replace('/miniapp/api','');if(opts.method){requests.push({key,body:JSON.parse(opts.body)});return {ok:true,json:async()=>({ok:true})}};if(!(key in data))throw Error('Unexpected '+key);return {ok:true,json:async()=>data[key]}};
+  await vm.runInContext('loadPricing()',context);
+  const forms=elements.pricingRules.children.filter(x=>x.className==='form-stack');
+  assert.equal(forms.length,2);
+  const promo=forms[1],scope=promo.children[0],target=promo.children[1],amount=promo.children[3],save=promo.children[8];
+  assert.equal(scope.value,'sku');
+  assert.equal(target.children[1].value,'42');
+  assert.match(target.children[1].textContent,/iPhone 17 Pro.*256 GB.*Black.*eSIM/);
+  target.value='42';amount.value='250';await save.onclick();
+  assert.equal(requests[0].key,'/pricing/promotion');
+  assert.equal(requests[0].body.scope,'sku');assert.equal(requests[0].body.target,'42');assert.equal(requests[0].body.amount,'250');
+  await vm.runInContext('loadCatalog()',context);
+  const form=elements.catalog.children.find(x=>x.className==='form-stack');
+  form.children[0].value='sku';form.children[0].onchange();
+  assert.equal(form.children[1].children[1].value,'42');
+  data['/products']=[];await vm.runInContext('loadPricing()',context);
+  const empty=elements.pricingRules.children.filter(x=>x.className==='form-stack')[1];
+  assert.equal(empty.children[1].disabled,true);assert.match(empty.children[2].textContent,/Сначала добавьте товары/);
+  console.log('Product selection, promotion payload, markup selection and empty state passed');
+})().catch(e=>{console.error(e);process.exitCode=1});
