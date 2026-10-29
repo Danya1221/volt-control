@@ -26,7 +26,29 @@ PHONE = re.compile(r"\b(?:iphone|galaxy|pixel|oneplus|honor|nothing)\b", re.I)
 TABLET = re.compile(r"\b(?:ipad|tablet|tab\s+s\d+)\b", re.I)
 LAPTOP = re.compile(r"\b(?:macbook|laptop)\b", re.I)
 
-def parse_lines(text: str):
+
+# Restrict this policy to resolved @hi_catalog_bot sources. Unknown entries are reviewed.
+HI_ACCESSORY = re.compile(r"^\s*(?:аксессуар|чехол|стекло|плёнк|пленк|заряд|кабель|adapter|charger|case|cover|cable)", re.I)
+HI_OTHER = re.compile(r"(?:\b(?:ipad|macbook|laptop|tablet|airpods|headphones|earbuds|headset|wh-1000\w*|smartwatch|insta360|dji|nintendo|playstation|xbox|dyson|gopro|ray[ -]?ban|oakley|instax)\b|(?:apple|galaxy|pixel|samsung|huawei)\s+watch\b|(?:galaxy|samsung)\s+tab\b|наушник|планшет|ноутбук|приставк|фен|смарт.?часы)", re.I)
+HI_IPHONE = re.compile(r"(?:\biphone\b|айфон)", re.I)
+HI_ANDROID = re.compile(r"(?:\bandroid\b|андроид|\b(?:oneplus|redmi|poco|realme|oppo|vivo|motorola)\b|\b(?:samsung|galaxy)\s+(?:galaxy\s+)?[aszm]\s?\d+|\bpixel\s+\d+|\bnothing\s+phone\b|\bhonor\s+(?:magic|\d)|\bxiaomi\s+\d)", re.I)
+
+def hi_kind(name):
+    if HI_ACCESSORY.search(name):
+        return 'other'
+    android = bool(HI_ANDROID.search(name))
+    iphone = bool(HI_IPHONE.search(name))
+    if android and iphone:
+        return 'uncertain'
+    if android:
+        return 'android'
+    if iphone:
+        return 'iphone'
+    if HI_OTHER.search(name):
+        return 'other'
+    return 'uncertain'
+
+def parse_lines(text: str, exclude_hi_android: bool = False):
     accepted, review, ignored = [], [], []
     for number, original in enumerate(text.splitlines(), 1):
         line = original.strip()
@@ -41,12 +63,22 @@ def parse_lines(text: str):
         if not name or not value.isdecimal() or Decimal(value) <= 0:
             review.append({"line": number, "raw": original, "reason": "Invalid product or price"})
             continue
+        if exclude_hi_android:
+            kind = hi_kind(name)
+            if kind == 'android':
+                ignored.append({"line": number, "raw": original, "reason": "Android-смартфоны этого поставщика исключены"})
+                continue
+            if kind == 'uncertain':
+                review.append({"line": number, "raw": original, "reason": "Нельзя уверенно исключить Android-смартфон"})
+                continue
         brand = next((key for key, pattern in BRANDS.items() if pattern.search(name)), None)
         if brand is None:
             review.append({"line": number, "raw": original, "reason": "Unknown brand"})
             continue
         category = ("Смартфоны" if PHONE.search(name) else "Планшеты" if TABLET.search(name)
                     else "Ноутбуки" if LAPTOP.search(name) else "Другое")
+        if exclude_hi_android and hi_kind(name) == 'other' and category == 'Смартфоны':
+            category = 'Другое'
         sim_hits = [label for label, pattern in SIM if pattern.search(name)]
         if category == "Смартфоны" and len(sim_hits) != 1:
             review.append({"line": number, "raw": original, "reason": "SIM configuration requires review"})
@@ -63,3 +95,4 @@ def parse_lines(text: str):
         })
     return {"candidates": accepted, "needs_review": review, "ignored": ignored,
             "complete": False, "can_publish": False}
+
