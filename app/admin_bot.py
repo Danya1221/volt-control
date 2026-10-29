@@ -9,6 +9,7 @@ import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,24 @@ async def run_bot():
         else:
             await message.answer('⚡ VOLT Control\n\nMini App ещё не настроено. Коды авторизации и пароли в чат не отправляй.')
 
+    @dp.message(Command("bindgroup"))
+    async def bindgroup(message: Message):
+        if message.from_user is None or message.from_user.id != owner_id:
+            return
+        if message.chat.type not in ('group', 'supergroup'):
+            await message.answer('Добавь бота администратором в нужную группу и отправь /bindgroup внутри неё.')
+            return
+        if os.getenv('VOLT_MINIAPP_ENABLED') != '1':
+            await message.answer('Сначала включи Mini App в настройках сервиса.')
+            return
+        from app.miniapp import bind_destination, DestinationIn
+        try:
+            await bind_destination(DestinationIn(chat=str(message.chat.id)))
+        except HTTPException as exc:
+            await message.answer(str(exc.detail))
+            return
+        await message.answer('Группа привязана к VOLT Control. Публикация пока выключена. Настройки доступны в разделе «Витрина».')
+
     @dp.message(Command("status"))
     async def status(message: Message):
         if message.from_user is None or message.from_user.id != owner_id:
@@ -50,11 +69,15 @@ async def run_bot():
     async def other(message: Message):
         if message.from_user is None or message.from_user.id != owner_id:
             return
-        await message.answer("Доступные команды: /start, /status. Не отправляй сюда коды входа.")
+        if message.chat.type != 'private':
+            return
+        await message.answer("Доступные команды: /start, /status, /bindgroup. Не отправляй сюда коды входа.")
 
     try:
         await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot, handle_signals=False)
     finally:
         await bot.session.close()
+
+
 

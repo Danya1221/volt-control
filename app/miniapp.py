@@ -14,6 +14,8 @@ from decimal import Decimal
 from urllib.parse import parse_qsl
 
 import qrcode
+from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -35,6 +37,7 @@ attempts = {}
 workers = {}
 worker_states = {}
 locks = {1: asyncio.Lock(), 2: asyncio.Lock()}
+destination_lock = asyncio.Lock()
 
 class ReaderAccount(Base):
     __tablename__ = 'telegram_reader_accounts'
@@ -58,6 +61,16 @@ class OfferImport(Base):
     message_hash: Mapped[str] = mapped_column(String(64))
     cost: Mapped[Decimal] = mapped_column(Numeric(14, 2))
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CatalogDestination(Base):
+    __tablename__ = 'catalog_destination'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    title: Mapped[str] = mapped_column(String(255))
+    is_forum: Mapped[bool] = mapped_column(default=False)
+    can_manage_topics: Mapped[bool] = mapped_column(default=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 def verify_init_data(raw, token, owner_id, now=None):
@@ -87,6 +100,77 @@ def owner(x_telegram_init_data: str = Header(default='')):
     token, owner_id = os.getenv('TG_BOT_TOKEN', ''), os.getenv('VOLT_OWNER_TG_ID', '')
     if not token or not owner_id.isdigit() or not verify_init_data(x_telegram_init_data, token, int(owner_id)):
         raise HTTPException(401, 'Откройте приложение заново из Telegram под аккаунтом владельца')
+
+
+def destination_payload(row):
+    return {'connected': True, 'chat_id': str(row.chat_id), 'title': row.title,
+            'is_forum': row.is_forum, 'can_manage_topics': row.can_manage_topics,
+            'checked_at': row.checked_at.isoformat(), 'publication_enabled': False}
+
+
+@router.get('/destination', dependencies=[Depends(owner)])
+def get_destination():
+    with Sessions() as db:
+        row = db.get(CatalogDestination, 1)
+        return destination_payload(row) if row else {'connected': False, 'publication_enabled': False}
+
+
+class DestinationIn(BaseModel):
+    chat: str = Field(min_length=1, max_length=128, pattern=r'^(?:-\d+|@[A-Za-z0-9_]{5,32})$')
+
+
+async def verify_destination(bot, target):
+    chat = await bot.get_chat(target)
+    if chat.type not in ('group', 'supergroup'):
+        raise HTTPException(422, 'Укажите группу или супергруппу, а не личный чат или канал')
+    admin_statuses = ('creator', 'administrator')
+    member = await bot.get_chat_member(chat.id, bot.id)
+    if member.status not in admin_statuses:
+        raise HTTPException(422, 'Добавьте бота в группу и назначьте администратором')
+    account = await bot.get_chat_member(chat.id, int(os.environ['VOLT_OWNER_TG_ID']))
+    if account.status not in admin_statuses:
+        raise HTTPException(403, 'Аккаунт владельца VOLT должен быть администратором этой группы')
+    return {'chat_id': chat.id, 'title': (chat.title or str(chat.id))[:255],
+            'is_forum': bool(getattr(chat, 'is_forum', False)),
+            'can_manage_topics': member.status == 'creator' or bool(getattr(member, 'can_manage_topics', False))}
+
+
+@router.put('/destination', dependencies=[Depends(owner)])
+async def bind_destination(body: DestinationIn):
+    token = os.getenv('TG_BOT_TOKEN')
+    if not token:
+        raise HTTPException(503, 'Токен бота не настроен')
+    async with destination_lock:
+        bot = Bot(token=token)
+        try:
+            target = int(body.chat) if body.chat.startswith('-') else body.chat
+            data = await asyncio.wait_for(verify_destination(bot, target), timeout=15)
+        except (TelegramAPIError, asyncio.TimeoutError):
+            raise HTTPException(422, 'Группа недоступна. Проверьте ID, добавление бота и его права администратора') from None
+        finally:
+            await bot.session.close()
+        with Sessions() as db:
+            row = db.get(CatalogDestination, 1)
+            if row is None:
+                row = CatalogDestination(id=1, **data, checked_at=datetime.now(timezone.utc))
+                db.add(row)
+            else:
+                for key, value in data.items():
+                    setattr(row, key, value)
+                row.checked_at = datetime.now(timezone.utc)
+            db.commit()
+            return destination_payload(row)
+
+
+@router.delete('/destination', dependencies=[Depends(owner)])
+async def unbind_destination():
+    async with destination_lock:
+        with Sessions() as db:
+            row = db.get(CatalogDestination, 1)
+            if row:
+                db.delete(row)
+                db.commit()
+    return {'connected': False, 'publication_enabled': False}
 
 
 def settings():
@@ -472,4 +556,6 @@ async def disconnect(slot: int):
                 db.delete(row)
                 db.commit()
     return {'ok': True}
+
+
 
