@@ -10,7 +10,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, String, Text, UniqueConstraint, create_engine, select
+from sqlalchemy import BigInteger, Boolean, DateTime, String, Text, UniqueConstraint, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, UsernameInvalidError, UsernameNotOccupiedError, ChannelPrivateError
@@ -36,6 +36,28 @@ class SupplierMessage(Base):
     text: Mapped[str] = mapped_column(Text)
     edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+class SupplierSource(Base):
+    __tablename__ = "supplier_telegram_sources"
+    __table_args__ = (UniqueConstraint("account", "chat_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account: Mapped[str] = mapped_column(String(100))
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    is_hi_catalog: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+def record_source(db, account, chat_id, configured, entity):
+    # Identity comes from resolving the Telegram peer, never the supplier name typed at import.
+    names = [str(configured) if isinstance(configured, str) else '', getattr(entity, 'username', '') or '']
+    names += [getattr(x, 'username', '') or '' for x in (getattr(entity, 'usernames', None) or [])]
+    is_hi = any(n.lstrip('@').casefold() == 'hi_catalog_bot' for n in names)
+    with db() as session:
+        row = session.scalar(select(SupplierSource).where(SupplierSource.account == account, SupplierSource.chat_id == chat_id))
+        if row is None:
+            session.add(SupplierSource(account=account, chat_id=chat_id, is_hi_catalog=is_hi))
+        elif is_hi:
+            row.is_hi_catalog = True
+        session.commit()
 
 class ChatCursor(Base):
     __tablename__ = "supplier_telegram_cursors"
@@ -93,7 +115,9 @@ async def monitor_account(config, db):
         for chat in chats:
             try:
                 entity = await client.get_entity(chat)
-                entities[await client.get_peer_id(entity)] = entity
+                chat_id = await client.get_peer_id(entity)
+                record_source(db, name, chat_id, chat, entity)
+                entities[chat_id] = entity
             except (ValueError, UsernameInvalidError, UsernameNotOccupiedError, ChannelPrivateError):
                 # A bad or inaccessible chat must not stop the other configured chats.
                 inaccessible.append(str(chat))
