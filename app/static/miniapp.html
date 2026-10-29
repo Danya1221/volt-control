@@ -79,21 +79,27 @@ async function loadMessages(slot, container, before=null){
       const p=await api('/accounts/'+slot+'/messages/'+m.id+'/preview');result.replaceChildren();
       result.append(el('p','Кандидатов: '+p.candidates.length+' · проверить: '+p.needs_review.length+' · пропущено: '+p.ignored.length));
       result.append(el('p','Это предварительный разбор, он не создаёт товары и не обновляет цены.','muted'));if(p.hi_android_excluded)result.append(el('p','Android-смартфоны @hi_catalog_bot исключены; айфоны остаются. Неоднозначные позиции остаются на проверке.','muted'));
-      for(const row of p.candidates.slice(0,50)){
-        const entry=el('div');entry.append(el('p',row.model+' — '+row.cost+' ₽'));
-        entry.append(btn('Добавить предложение',async()=>{
+      function addEntry(parent,row,confirmIphone=false){
+        const entry=el('div');entry.append(el('p',(confirmIphone?'Возможно, ': '')+row.model+' — '+row.cost+' ₽'+(row.sim?' · '+row.sim:'')));
+        entry.append(btn(confirmIphone?'Это iPhone — добавить':'Добавить предложение',async()=>{
           let form=el('div');const supplier=el('input');supplier.placeholder='Название реального поставщика';supplier.maxLength=200;
-          form.append(el('p','Проверьте название и стоимость выше. Если предложение этого поставщика уже есть, его цена будет обновлена.','muted'),supplier);
+          form.append(el('p','Проверьте название, конфигурацию и стоимость выше. Если предложение этого поставщика уже есть, его цена будет обновлена.','muted'),supplier);
           form.append(btn('Подтвердить цену на сегодня и добавить',async()=>{
             const name=supplier.value.trim();if(!name)throw Error('Введите название поставщика');
-            if(!confirm('Цена '+row.cost+' ₽ для «'+row.model+'» подтверждена на сегодня?'))return;
-            const added=await api('/accounts/'+slot+'/messages/'+m.id+'/import-line',{method:'POST',body:JSON.stringify({line:row.line,message_hash:p.message_hash,supplier_name:name,confirmed_today:true})});
+            const question=(confirmIphone?'Подтверждаете, что это iPhone?\n':'')+'Цена '+row.cost+' ₽ для «'+row.model+'» подтверждена на сегодня?';
+            if(!confirm(question))return;
+            const added=await api('/accounts/'+slot+'/messages/'+m.id+'/import-line',{method:'POST',body:JSON.stringify({line:row.line,message_hash:p.message_hash,supplier_name:name,confirmed_today:true,confirmed_iphone:confirmIphone})});
             form.replaceChildren(el('p',added.approved?'Предложение обновлено.':'Добавлено. Товар ожидает одобрения.','status'));
           }));entry.append(form)
-        },'secondary'));result.append(entry)
+        },'secondary'));parent.append(entry)
       }
-      for(const row of p.needs_review.slice(0,30))result.append(el('p','Проверить: '+row.raw));
-      if(p.candidates.length>50 || p.needs_review.length>30)result.append(el('p','Показана часть результатов.','muted'));
+      function paged(items,size,render){
+        const section=el('div');result.append(section);let offset=0,more;
+        function show(){if(more)more.remove();for(const row of items.slice(offset,offset+size))render(section,row);offset+=size;if(offset<items.length){more=btn('Показать ещё ('+(items.length-offset)+')',async()=>show(),'secondary');section.append(more)}}
+        show();
+      }
+      paged(p.candidates,50,(section,row)=>addEntry(section,row));
+      paged(p.needs_review,30,(section,row)=>{if(row.possible_iphone)addEntry(section,row.possible_iphone,true);else section.append(el('p','Проверить: '+row.raw+' — '+row.reason))});
     },'secondary'),result)}container.append(details)
   }
   if(data.next_before){let more=btn('Ещё сообщения',async()=>{more.remove();await loadMessages(slot,container,data.next_before)},'secondary');container.append(more)}

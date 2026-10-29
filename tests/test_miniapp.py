@@ -389,3 +389,41 @@ def test_hi_source_filter_is_enforced_in_preview_and_import(monkeypatch):
     with sessions() as db:
         assert len(db.scalars(select(Product)).all()) == 1
     engine.dispose()
+
+
+def test_hi_short_iphone_needs_explicit_identity_confirmation(monkeypatch):
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from app.integrated_collector import SupplierMessage, SupplierSource, Base as CollectorBase
+    from app.main import Product
+    monkeypatch.setenv('VOLT_MINIAPP_ENABLED', '1')
+    monkeypatch.setenv('TG_BOT_TOKEN', 'bot-token')
+    monkeypatch.setenv('VOLT_OWNER_TG_ID', '123')
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    miniapp.Base.metadata.create_all(engine)
+    CollectorBase.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    monkeypatch.setattr(miniapp, 'Sessions', sessions)
+    with sessions() as db:
+        db.add(miniapp.ReaderAccount(slot=1, telegram_id='111', display_name='Reader', encrypted_session='x', chats_json='[]'))
+        db.add(SupplierSource(account='miniapp-111', chat_id=1, is_hi_catalog=True))
+        db.add(SupplierMessage(account='miniapp-111', chat_id=1, message_id=1,
+                               text='17 Pro 256 Silver (1Sim+eSim) - 99000\nSamsung Galaxy S25 eSIM - 70000',
+                               seen_at=datetime.now(timezone.utc)))
+        db.commit()
+        msg_id = db.scalar(select(SupplierMessage.id))
+    client = TestClient(app)
+    headers = {'X-Telegram-Init-Data': signed()}
+    path = f'/miniapp/api/accounts/1/messages/{msg_id}'
+    preview = client.get(path+'/preview', headers=headers).json()
+    assert preview['needs_review'][0]['possible_iphone']['sim'] == 'SIM + eSIM'
+    payload = {'line': 1, 'message_hash':preview['message_hash'], 'supplier_name':'Supplier', 'confirmed_today':True}
+    assert client.post(path+'/import-line', json=payload, headers=headers).status_code == 422
+    assert client.post(path+'/import-line', json={**payload, 'line':2,'confirmed_iphone':True}, headers=headers).status_code == 422
+    assert client.post(path+'/import-line', json={**payload, 'confirmed_iphone':True}, headers=headers).status_code == 200
+    with sessions() as db:
+        product = db.scalar(select(Product))
+        assert product.model.startswith('iPhone 17 Pro')
+        assert product.sim == 'SIM + eSIM'
+        assert not product.approved
+    engine.dispose()

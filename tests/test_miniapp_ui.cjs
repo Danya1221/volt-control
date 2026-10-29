@@ -1,7 +1,8 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 class Element{
  constructor(tag){this.tag=tag;this.children=[];this.attributes={};this.dataset={};this.hidden=false;this.value='';this.textContent='';this.style={}}
- append(...children){this.children.push(...children)}
+ append(...children){for(const c of children)c.parent=this;this.children.push(...children)}
+ remove(){if(this.parent)this.parent.children=this.parent.children.filter(x=>x!==this)}
  replaceChildren(...children){this.children=[...children]}
  setAttribute(k,v){this.attributes[k]=v}
 }
@@ -51,5 +52,25 @@ const firstTest=(async()=>{await new Promise(r=>setImmediate(r));assert.equal(el
   tg.isFullscreen=true;events.fullscreenChanged();assert.equal(elements.fullscreenBtn.textContent,'Свернуть');
   events.fullscreenFailed({error:'UNSUPPORTED'});assert.match(elements.error.textContent,/не поддерживает/);
   console.log('Fullscreen controls and unsupported-client fallback passed');
+  const items=Array.from({length:51},(_,i)=>({line:i+1,model:'AirPods '+(i+1),cost:'10000',sim:''}));
+  const iphone={line:52,model:'iPhone 17 Pro 256 Silver',cost:'99000',sim:'SIM + eSIM'};
+  data['/accounts/1/messages']={messages:[{id:10,chat_id:'1',seen_at:'2026-10-29T12:00:00Z',text:'source'}]};
+  data['/accounts/1/messages/10/preview']={candidates:items,needs_review:[{possible_iphone:iphone}],ignored:[],message_hash:'abc',hi_android_excluded:true};
+  const holder=new Element('div');context.holder=holder;
+  await vm.runInContext('loadMessages(1,holder)',context);
+  const details=holder.children[0];await details.children.find(x=>x.textContent==='Предварительно разобрать').onclick();
+  const result=details.children.find(x=>x.className==='result');
+  assert.doesNotMatch(all(result),/AirPods 51 —/);
+  const candidateList=result.children.find(x=>x.children.some(y=>y.textContent.startsWith('Показать ещё')));
+  await candidateList.children.find(x=>x.textContent.startsWith('Показать ещё')).onclick();
+  assert.match(all(result),/AirPods 51 —/);
+  const reviewList=result.children.find(x=>all(x).includes('Это iPhone — добавить'));
+  const entry=reviewList.children[0];await entry.children.find(x=>x.textContent==='Это iPhone — добавить').onclick();
+  const input=entry.children[2].children.find(x=>x.tag==='input');input.value='supplier';context.confirm=()=>true;
+  const confirmSave=entry.children[2].children.find(x=>x.tag==='button');await confirmSave.onclick();
+  const req=requests[requests.length-1];assert.equal(req.key,'/accounts/1/messages/10/import-line');assert.equal(req.body.confirmed_iphone,true);assert.equal(req.body.line,52);
+  console.log('Price preview pagination and iPhone confirmation passed');
+
 })().catch(e=>{console.error(e);process.exitCode=1});
+
 
