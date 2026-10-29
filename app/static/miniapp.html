@@ -13,23 +13,50 @@ input[type="datetime-local"]{min-inline-size:0}
 .card p{margin-top:12px;margin-bottom:14px}
 .card button{max-width:100%;white-space:normal}
 .form-stack{display:flex;flex-direction:column;gap:12px;margin:16px 0 24px}.form-stack>input,.form-stack>select,.form-stack>textarea,.form-stack>button{margin:0}.form-stack>button{align-self:flex-start}.form-stack>p,.form-stack>label{margin:0}.form-stack select{min-height:46px;appearance:auto}.form-stack input[type="checkbox"]{align-self:flex-start}.help{font-size:13px;color:#bdc6d8}
+
+/* Responsive navigation: every section is visible without horizontal scrolling. */
+body{max-width:1240px;box-sizing:border-box;padding:20px 16px 48px}
+.top{align-items:center;margin-bottom:18px}.top>div:nth-child(2){min-width:0;flex:1}.sub{margin:4px 0 0}
+.tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;overflow:visible;padding:4px 0 16px}
+.tabs button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:0;min-height:66px;margin:0;padding:8px 5px;border:1px solid #394558;border-radius:12px;background:#242d3c;color:#dce5f3;font:600 12px/1.2 system-ui;text-align:center;white-space:normal;overflow-wrap:anywhere}
+.tabs button[aria-selected="true"]{background:#b9ff63;border-color:#b9ff63;color:#17230f}
+.tab-icon{display:grid;place-items:center;flex:0 0 25px;width:25px;height:25px;border-radius:8px;background:rgba(255,255,255,.08);font-size:17px;line-height:1}
+.tabs button[aria-selected="true"] .tab-icon{background:rgba(23,35,15,.1)}
+.fullscreen{flex:0 0 auto;margin:0;padding:9px 11px;font-size:13px}
+.card{min-width:0}.destination-form{margin-top:16px}
+@media(max-width:360px){.tabs button{padding:8px 6px;font-size:12px;gap:5px}.tab-icon{flex-basis:22px;width:22px;height:22px}}
+@media(min-width:800px){body{padding:30px 36px 64px}.tabs{grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;padding-bottom:22px}.tabs button{flex-direction:row;gap:8px;min-height:60px;padding:12px;font-size:14px}.metrics{grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}#tab-pricing:not([hidden]){display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:16px;align-items:start}#tab-pricing>.card{margin:0}#accounts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}#accounts>.card{margin:0}}
+@media(min-width:1200px){body{padding-left:48px;padding-right:48px}}
 </style></head><body>
-<div class="top"><div class="bolt">⚡</div><div><h1>VOLT Control</h1><div class="sub">Управление аккаунтами поставщиков</div></div></div>
+<div class="top"><div class="bolt">⚡</div><div><h1>VOLT Control</h1><div class="sub">Каталог, цены и поставщики</div></div><button id="fullscreenBtn" class="secondary fullscreen" type="button" hidden>Развернуть</button></div>
 <div id="error" class="error" role="alert"></div>
 <nav class="tabs" aria-label="Разделы VOLT Control">
-<button type="button" data-tab="home" aria-selected="true">Главная</button><button type="button" data-tab="catalog" aria-selected="false">Каталог</button><button type="button" data-tab="pricing" aria-selected="false">Наценки и акции</button><button type="button" data-tab="suppliers" aria-selected="false">Поставщики</button><button type="button" data-tab="reviews" aria-selected="false">Проверки</button><button type="button" data-tab="preview" aria-selected="false">Витрина</button>
+<button type="button" data-tab="home" aria-selected="true"><span class="tab-icon" aria-hidden="true">⌂</span><span>Главная</span></button>
+<button type="button" data-tab="catalog" aria-selected="false"><span class="tab-icon" aria-hidden="true">▦</span><span>Каталог</span></button>
+<button type="button" data-tab="pricing" aria-selected="false"><span class="tab-icon" aria-hidden="true">₽</span><span>Цены и акции</span></button>
+<button type="button" data-tab="suppliers" aria-selected="false"><span class="tab-icon" aria-hidden="true">⇄</span><span>Поставщики</span></button>
+<button type="button" data-tab="reviews" aria-selected="false"><span class="tab-icon" aria-hidden="true">✓</span><span>Проверки</span></button>
+<button type="button" data-tab="preview" aria-selected="false"><span class="tab-icon" aria-hidden="true">◉</span><span>Витрина</span></button>
 </nav>
 <div id="tab-home"><section class="card"><h2>Главная</h2><p class="muted">Данные из рабочей базы. Товары из прототипа сюда не добавляются.</p><div class="metrics" id="metrics"><span class="muted">Загружаем данные…</span></div><div class="actions"><button type="button" data-go="reviews" class="secondary">Проверки</button><button type="button" data-go="suppliers" class="secondary">Поставщики</button><button type="button" data-go="catalog" class="secondary">Каталог</button></div></section></div>
 <div id="tab-suppliers" hidden><p class="notice muted">Подключайте аккаунты и просматривайте полученные сообщения. Разбор прайса предварительный.</p><button id="reload" class="secondary" type="button">Обновить статус</button><div id="accounts"></div></div>
 <div id="tab-catalog" hidden><section class="card"><h2>Товары</h2><p class="muted">Новые позиции требуют вашего одобрения. Публикация каталога пока не подключена.</p><button id="catalogBtn" class="secondary" type="button">Обновить товары</button><div id="catalog"></div></section></div>
 <div id="tab-pricing" hidden><section class="card"><h2>Обзор цен</h2><p class="muted">Актуальные предложения, московское время и режим расчёта.</p><button id="pricingBtn" class="secondary" type="button">Обновить обзор</button><div id="pricing"></div></section><section class="card"><h2>Акции и ночной резерв</h2><div id="pricingRules"></div></section></div>
 <div id="tab-reviews" hidden><section class="card"><h2>Проверки товаров</h2><p class="muted">Новые товары остаются в очереди до одобрения. Для сверки откройте исходное сообщение в разделе «Поставщики».</p><button id="reviewsBtn" class="secondary" type="button">Обновить очередь</button><div id="reviews"></div></section></div>
-<div id="tab-preview" hidden><section class="card"><h2>Витрина</h2><p class="muted">Публикация каталога и проверенный предпросмотр для покупателей ещё разрабатываются. Сообщения в Telegram не отправляются.</p></section></div>
+<div id="tab-preview" hidden><section class="card"><h2>Привязка чата каталога</h2><p class="muted">Добавь @prostootdushi22_bot администратором в чат. Затем отправь в этом чате команду <b>/bindgroup@prostootdushi22_bot</b> от аккаунта владельца VOLT. Поддерживаются чаты с темами.</p><div id="destination" class="destination-form"></div></section><section class="card"><h2>Публикация</h2><p class="muted">Привязка сохраняет чат. Публикация товаров и распределение по темам пока не подключены.</p></section></div>
 <script>
 'use strict';
 const tg=window.Telegram?.WebApp; tg?.ready(); tg?.expand();
 const root=document.getElementById('accounts'), error=document.getElementById('error');
 const timers={};
+const fullscreenBtn=document.getElementById('fullscreenBtn');
+if(tg && typeof tg.isVersionAtLeast==='function' && tg.isVersionAtLeast('8.0') && typeof tg.requestFullscreen==='function'){
+ fullscreenBtn.hidden=false;
+ const updateFullscreen=()=>{fullscreenBtn.textContent=tg.isFullscreen?'Свернуть':'Развернуть'};
+ updateFullscreen();fullscreenBtn.onclick=()=>{if(tg.isFullscreen && typeof tg.exitFullscreen==='function')tg.exitFullscreen();else tg.requestFullscreen()};
+ if(typeof tg.onEvent==='function'){tg.onEvent('fullscreenChanged',updateFullscreen);tg.onEvent('fullscreenFailed',()=>{error.textContent='Этот клиент Telegram не поддерживает полноэкранный режим.'})}
+}
+
 async function api(path,opts={}){const res=await fetch('/miniapp/api'+path,{...opts,cache:'no-store',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':tg?.initData||'',...(opts.headers||{})}}); let data=await res.json().catch(()=>({}));if(!res.ok)throw Error(typeof data.detail==='string'?data.detail:'Не удалось выполнить запрос');return data}
 function el(tag,text,cls){const x=document.createElement(tag);if(text!==undefined)x.textContent=text;if(cls)x.className=cls;return x}
 function btn(label,fn,cls){let b=el('button',label,cls);b.type='button';b.onclick=async()=>{b.disabled=true;error.textContent='';try{await fn()}catch(e){error.textContent=e.message}finally{b.disabled=false}};return b}
@@ -153,12 +180,23 @@ async function loadReviews(){
  d.append(el('p','Сверьте товар с исходным сообщением в разделе «Поставщики». Подробная история решений ещё разрабатывается.','muted'));
  d.append(btn('Одобрить товар',async()=>{if(!confirm('Вы сверили товар с источником?'))return;await api('/products/'+p.id+'/approve',{method:'PATCH',body:JSON.stringify({value:true})});await loadReviews();await loadHome()},'secondary'));root.append(d)}
 }
+async function loadDestination(){
+ const data=await api('/destination'), box=document.getElementById('destination');box.replaceChildren();
+ if(data.connected){box.append(el('p','Привязан: '+data.title,'status'),el('p',data.is_forum?'Чат с темами':'Чат без тем','muted'));
+  box.append(el('p','Права проверены: '+new Date(data.checked_at).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'}),'muted'));
+  if(data.is_forum&&!data.can_manage_topics)box.append(el('p','Для создания тем понадобится право бота «Управление темами».','muted'));
+ }else box.append(el('p','Чат пока не привязан.','muted'));
+ const chat=el('input');chat.placeholder='ID или публичный @username чата';chat.value=data.connected?data.chat_id:'';chat.maxLength=128;chat.autocomplete='off';
+ box.append(el('p','Или привяжи чат по ID / @username','label'),chat,btn('Проверить и привязать',async()=>{if(!chat.value.trim())throw Error('Укажите ID или @username чата');await api('/destination',{method:'PUT',body:JSON.stringify({chat:chat.value.trim()})});await loadDestination()}));
+ if(data.connected)box.append(btn('Отвязать чат',async()=>{if(!confirm('Отвязать чат от VOLT? Сам чат и его сообщения останутся в Telegram.'))return;await api('/destination',{method:'DELETE'});await loadDestination()},'secondary'));
+ box.append(el('p','Публикация выключена. После изменения прав бота повтори проверку.','muted'));
+}
 function showTab(name){
  const allowed=['home','catalog','pricing','suppliers','reviews','preview'];if(!allowed.includes(name))return;
  for(const tab of allowed)document.getElementById('tab-'+tab).hidden=tab!==name;
  document.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.tab===name)));
  error.textContent='';
- const work={home:loadHome,catalog:loadCatalog,pricing:loadPricing,suppliers:refresh,reviews:loadReviews}[name];
+ const work={home:loadHome,catalog:loadCatalog,pricing:loadPricing,suppliers:refresh,reviews:loadReviews,preview:loadDestination}[name];
  if(work)work().catch(e=>{error.textContent=e.message});
 }
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));
@@ -170,6 +208,7 @@ document.getElementById('catalogBtn').onclick=()=>loadCatalog().catch(e=>{error.
 document.getElementById('reload').onclick=()=>refresh().catch(e=>{error.textContent=e.message});
 showTab('home');
 </script></body></html>
+
 
 
 

@@ -222,3 +222,55 @@ def test_reviewed_import_and_catalog_controls(monkeypatch):
         assert str(db.scalar(select(Offer)).cost) == '60000.00'
         assert len(db.scalars(select(miniapp.OfferImport)).all()) == 1
     engine.dispose()
+
+
+
+def test_group_binding_checks_access_and_never_publishes(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setenv('VOLT_MINIAPP_ENABLED', '1')
+    monkeypatch.setenv('TG_BOT_TOKEN', 'bot-token')
+    monkeypatch.setenv('VOLT_OWNER_TG_ID', '123')
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    miniapp.Base.metadata.create_all(engine)
+    monkeypatch.setattr(miniapp, 'Sessions', sessionmaker(engine))
+
+    class FakeBot:
+        id = 999
+        owner_admin = True
+        bot_admin = True
+        chat_type = 'supergroup'
+        closed = 0
+        def __init__(self, token): self.session = self
+        async def close(self): FakeBot.closed += 1
+        async def get_chat(self, target):
+            return SimpleNamespace(id=-1001234567890, title='Catalog group', type=self.chat_type, is_forum=True)
+        async def get_chat_member(self, chat_id, user_id):
+            is_admin = self.bot_admin if user_id == self.id else self.owner_admin
+            return SimpleNamespace(status='administrator' if is_admin else 'member', can_manage_topics=True)
+    monkeypatch.setattr(miniapp, 'Bot', FakeBot)
+    client = TestClient(app)
+    headers = {'X-Telegram-Init-Data': signed()}
+    path = '/miniapp/api/destination'
+    assert client.get(path).status_code == 401
+    assert client.put(path, json={'chat': '-1001234567890'}).status_code == 401
+    assert client.get(path, headers=headers).json()['connected'] is False
+    assert client.put(path, headers=headers, json={'chat': 'https://not-a-group'}).status_code == 422
+    FakeBot.bot_admin = False
+    assert client.put(path, headers=headers, json={'chat': '-1001234567890'}).status_code == 422
+    assert client.get(path, headers=headers).json()['connected'] is False
+    FakeBot.bot_admin = True
+    response = client.put(path, headers=headers, json={'chat': '-1001234567890'})
+    assert response.status_code == 200
+    assert response.json()['chat_id'] == '-1001234567890'
+    assert response.json()['is_forum'] is True
+    assert response.json()['publication_enabled'] is False
+    FakeBot.owner_admin = False
+    assert client.put(path, headers=headers, json={'chat': '@another_group'}).status_code == 403
+    assert client.get(path, headers=headers).json()['title'] == 'Catalog group'
+    FakeBot.owner_admin = True
+    FakeBot.chat_type = 'channel'
+    assert client.put(path, headers=headers, json={'chat': '@another_group'}).status_code == 422
+    assert FakeBot.closed == 4
+    assert client.delete(path, headers=headers).json()['connected'] is False
+    engine.dispose()
+
