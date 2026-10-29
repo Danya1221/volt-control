@@ -43,7 +43,7 @@ body{max-width:1240px;box-sizing:border-box;padding:20px 16px 48px}
 <div id="tab-catalog" hidden><section class="card"><h2>Товары</h2><p class="muted">Новые позиции требуют вашего одобрения. Публикация каталога пока не подключена.</p><button id="catalogBtn" class="secondary" type="button">Обновить товары</button><div id="catalog"></div></section></div>
 <div id="tab-pricing" hidden><section class="card"><h2>Обзор цен</h2><p class="muted">Актуальные предложения, московское время и режим расчёта.</p><button id="pricingBtn" class="secondary" type="button">Обновить обзор</button><div id="pricing"></div></section><section class="card"><h2>Акции и ночной резерв</h2><div id="pricingRules"></div></section></div>
 <div id="tab-reviews" hidden><section class="card"><h2>Проверки товаров</h2><p class="muted">Новые товары остаются в очереди до одобрения. Для сверки откройте исходное сообщение в разделе «Поставщики».</p><button id="reviewsBtn" class="secondary" type="button">Обновить очередь</button><div id="reviews"></div></section></div>
-<div id="tab-preview" hidden><section class="card"><h2>Привязка чата каталога</h2><p class="muted">Добавь @prostootdushi22_bot администратором в чат. Затем отправь в этом чате команду <b>/bindgroup@prostootdushi22_bot</b> от аккаунта владельца VOLT. Поддерживаются чаты с темами.</p><div id="destination" class="destination-form"></div></section><section class="card"><h2>Публикация</h2><p class="muted">Привязка сохраняет чат. Публикация товаров и распределение по темам пока не подключены.</p></section></div>
+<div id="tab-preview" hidden><section class="card"><h2>Привязка чата каталога</h2><p class="muted">Добавь @prostootdushi22_bot администратором в чат. Открой личный чат с ботом, отправь <b>/start</b>, нажми <b>«Привязать чат»</b> и выбери нужный чат кнопкой Telegram. Поддерживаются чаты с темами.</p><div id="destination" class="destination-form"></div></section><section class="card"><h2>Публикация</h2><p class="muted">Привязка сохраняет чат. Публикация товаров и распределение по темам пока не подключены.</p></section></div>
 <script>
 'use strict';
 const tg=window.Telegram?.WebApp; tg?.ready(); tg?.expand();
@@ -208,6 +208,7 @@ document.getElementById('catalogBtn').onclick=()=>loadCatalog().catch(e=>{error.
 document.getElementById('reload').onclick=()=>refresh().catch(e=>{error.textContent=e.message});
 showTab('home');
 </script></body></html>
+
 
 
 

@@ -93,6 +93,23 @@ engine = create_engine(db_url, connect_args={"check_same_thread":False} if db_ur
 Sessions = sessionmaker(engine)
 logger = logging.getLogger(__name__)
 collector_status = {"enabled": False, "state": "disabled"}
+bot_status = {"state": "disabled"}
+
+
+async def bot_supervisor():
+    from app.admin_bot import run_bot
+    while True:
+        try:
+            bot_status['state'] = 'starting'
+            await run_bot(on_started=lambda: bot_status.__setitem__('state', 'started'))
+            bot_status['state'] = 'disconnected'
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            bot_status['state'] = 'retrying'
+            # Do not log exception text: network errors may contain credentials.
+            logger.error('Admin bot stopped (%s); retrying in 30 seconds', type(exc).__name__)
+        await asyncio.sleep(30)
 
 async def collector_supervisor():
     from app.integrated_collector import run_collector
@@ -117,8 +134,7 @@ async def lifespan(app):
     if os.getenv("VOLT_BOT_ENABLED") == "1":
         if not os.getenv("TG_BOT_TOKEN") or not os.getenv("VOLT_OWNER_TG_ID", "").isdigit():
             raise RuntimeError("TG_BOT_TOKEN and VOLT_OWNER_TG_ID required to enable bot")
-        from app.admin_bot import run_bot
-        bot_task = asyncio.create_task(run_bot())
+        bot_task = asyncio.create_task(bot_supervisor())
     if os.getenv("VOLT_COLLECTOR_ENABLED") == "1":
         if os.getenv("WEB_CONCURRENCY", "1") != "1":
             raise RuntimeError("Integrated collector requires exactly one API worker")
@@ -150,7 +166,7 @@ def admin(x_api_key: str | None = Header(None)):
 
 @app.get("/health")
 def health():
-    return {"ok":True,"demo_data":False,"collector":collector_status["state"]}
+    return {"ok":True,"demo_data":False,"collector":collector_status["state"],"bot":bot_status['state']}
 
 @app.post("/admin/suppliers",dependencies=[Depends(admin)])
 def add_supplier(body:NameIn,s:Session=Depends(session)):
@@ -270,4 +286,5 @@ def miniapp_page():
         'Referrer-Policy': 'no-referrer',
         'Content-Security-Policy': "default-src 'none'; script-src https://telegram.org 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org",
     })
+
 
