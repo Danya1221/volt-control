@@ -45,3 +45,39 @@ def test_import_on_disposable_postgres(monkeypatch):
         CollectorBase.metadata.drop_all(engine)
         main.Base.metadata.drop_all(engine)
         engine.dispose()
+
+
+
+def test_reader_lock_blocks_parallel_use_and_releases(monkeypatch):
+    import asyncio
+    url = os.getenv('VOLT_TEST_POSTGRES_URL')
+    if not url:
+        pytest.skip('No disposable PostgreSQL configured')
+    parsed = make_url(url)
+    if parsed.host not in ('127.0.0.1', 'localhost') or parsed.database != 'volt_control_test':
+        pytest.fail('VOLT_TEST_POSTGRES_URL must target local disposable volt_control_test')
+    engine = create_engine(url)
+    monkeypatch.setattr(main, 'engine', engine)
+    async def check():
+        started = asyncio.Event()
+        stop = asyncio.Event()
+        calls = []
+        async def monitor(config, db):
+            calls.append(1)
+            started.set()
+            await stop.wait()
+        monkeypatch.setattr(miniapp, 'monitor_account', monitor)
+        account = {'telegram_id': '123456'}
+        first = asyncio.create_task(miniapp.guarded_monitor(1, account, {}))
+        await asyncio.wait_for(started.wait(), 2)
+        with pytest.raises(miniapp.ReaderBusy):
+            await miniapp.guarded_monitor(1, account, {})
+        assert len(calls) == 1
+        stop.set()
+        await first
+        await miniapp.guarded_monitor(1, account, {})
+        assert len(calls) == 2
+    try:
+        asyncio.run(check())
+    finally:
+        engine.dispose()

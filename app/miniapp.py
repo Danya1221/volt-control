@@ -19,7 +19,7 @@ from aiogram.exceptions import TelegramAPIError
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Integer, String, Text, DateTime, Numeric, ForeignKey, select
+from sqlalchemy import BigInteger, Integer, String, Text, DateTime, Numeric, ForeignKey, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 from telethon import TelegramClient
@@ -47,6 +47,54 @@ class ReaderAccount(Base):
     display_name: Mapped[str] = mapped_column(String(200))
     encrypted_session: Mapped[str] = mapped_column(Text)
     chats_json: Mapped[str] = mapped_column(Text, default='[]')
+
+
+class ReaderSwitch(Base):
+    # Missing rows deliberately mean paused during the one-time migration.
+    __tablename__ = 'telegram_reader_switches'
+    slot: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(default=False)
+
+
+def reader_enabled(slot):
+    with Sessions() as db:
+        row = db.get(ReaderSwitch, slot)
+        return bool(row and row.enabled)
+
+
+class ReaderBusy(Exception):
+    pass
+
+
+async def guarded_monitor(slot, data, config):
+    """Hold a PostgreSQL session lock while this Telegram session is connected."""
+    from app.main import engine
+    key = int.from_bytes(hashlib.sha256(('volt-reader:' + data['telegram_id']).encode()).digest()[:8], 'big', signed=True)
+    conn = engine.connect().execution_options(isolation_level='AUTOCOMMIT')
+    locked = False
+    task = None
+    try:
+        locked = bool(conn.execute(text('SELECT pg_try_advisory_lock(:key)'), {'key': key}).scalar())
+        if not locked:
+            raise ReaderBusy()
+        task = asyncio.create_task(monitor_account(config, Sessions))
+        while not task.done():
+            # Fail closed if the database connection holding the lock disappears.
+            done, _ = await asyncio.wait({task}, timeout=10)
+            if not done:
+                conn.execute(text('SELECT 1'))
+        await task
+    finally:
+        if task and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        if locked:
+            try:
+                conn.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': key})
+            except Exception:
+                conn.invalidate()
+        conn.close()
 
 
 class OfferImport(Base):
@@ -206,6 +254,9 @@ async def reader_worker(slot):
         if not data or not data['chats']:
             worker_states[slot] = 'not_configured'
             return
+        if not reader_enabled(slot):
+            worker_states[slot] = 'paused'
+            return
         try:
             api_id, api_hash, cipher = settings()
             session_string = cipher.decrypt(data['session'].encode()).decode()
@@ -215,12 +266,14 @@ async def reader_worker(slot):
                 worker_details[slot]['inaccessible_chats'] = inaccessible
             def ready():
                 worker_states[slot] = 'partial' if worker_details[slot].get('inaccessible_chats') else 'monitoring'
-            await monitor_account({'name': f"miniapp-{data['telegram_id']}", 'chats': data['chats'],
+            await guarded_monitor(slot, data, {'name': f"miniapp-{data['telegram_id']}", 'chats': data['chats'],
                                    'session_string': session_string, 'api_id': api_id,
-                                   'api_hash': api_hash, 'on_chats': chats_checked, 'on_ready': ready}, Sessions)
+                                   'api_hash': api_hash, 'on_chats': chats_checked, 'on_ready': ready})
             worker_states[slot] = 'disconnected'
         except asyncio.CancelledError:
             raise
+        except ReaderBusy:
+            worker_states[slot] = 'waiting'
         except Exception as exc:
             # Only safe classifications are exposed; exception text may contain secrets.
             from telethon.errors import FloodWaitError, AuthKeyError, SessionRevokedError
@@ -258,7 +311,10 @@ async def restart_worker(slot):
     await stop_worker(slot)
     data = saved(slot)
     if data and data['chats']:
-        workers[slot] = asyncio.create_task(reader_worker(slot))
+        if reader_enabled(slot):
+            workers[slot] = asyncio.create_task(reader_worker(slot))
+        else:
+            worker_states[slot] = 'paused'
 
 
 async def start():
@@ -348,6 +404,26 @@ async def accounts():
                        'monitor_details': worker_details.get(slot, {}),
                        'login': attempts.get(slot, {}).get('state', 'idle')})
     return result
+
+
+@router.post('/accounts/{slot}/resume', dependencies=[Depends(owner)])
+async def resume_reader(slot: int):
+    validate_slot(slot)
+    async with locks[slot]:
+        with Sessions() as db:
+            account = db.get(ReaderAccount, slot)
+            if not account:
+                raise HTTPException(404, 'Сначала подключите аккаунт')
+            if not json.loads(account.chats_json):
+                raise HTTPException(422, 'Сначала сохраните чаты')
+            switch = db.get(ReaderSwitch, slot)
+            if switch is None:
+                db.add(ReaderSwitch(slot=slot, enabled=True))
+            else:
+                switch.enabled = True
+            db.commit()
+        await restart_worker(slot)
+    return {'ok': True}
 
 
 @router.get('/accounts/{slot}/messages', dependencies=[Depends(owner)])
