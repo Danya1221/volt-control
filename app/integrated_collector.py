@@ -106,6 +106,8 @@ async def monitor_account(config, db):
     try:
         if not await client.is_user_authorized():
             raise RuntimeError(f"{name}: session not authorized")
+        if config.get('on_client'):
+            config['on_client'](client)
         entities = {}
         # StringSession does not preserve Telethon's entity cache. Populate it
         # from dialogs so explicit numeric IDs also work after a restart.
@@ -155,6 +157,8 @@ async def monitor_account(config, db):
         else:
             await client.run_until_disconnected()
     finally:
+        if config.get('on_client'):
+            config['on_client'](None)
         await client.disconnect()
 
 async def run_collector(database_url):

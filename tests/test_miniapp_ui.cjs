@@ -6,7 +6,7 @@ class Element{
  replaceChildren(...children){this.children=[...children]}
  setAttribute(k,v){this.attributes[k]=v}
 }
-const ids=['accounts','error','metrics','catalog','pricing','pricingRules','reviews','destination','fullscreenBtn','reviewsBtn','pricingBtn','catalogBtn','reload',...['home','catalog','pricing','suppliers','reviews','preview'].map(s=>'tab-'+s)];
+const ids=['accounts','error','metrics','catalog','pricing','pricingRules','reviews','destination','topicSettings','fullscreenBtn','reviewsBtn','pricingBtn','catalogBtn','reload',...['home','catalog','pricing','suppliers','reviews','preview'].map(s=>'tab-'+s)];
 const elements=Object.fromEntries(ids.map(id=>[id,new Element('div')]));
 const buttons=['home','catalog','pricing','suppliers','reviews','preview'].map(x=>{let e=new Element('button');e.dataset.tab=x;return e});
 const shortcuts=['reviews','suppliers','catalog'].map(x=>{let e=new Element('button');e.dataset.go=x;return e});
@@ -70,6 +70,15 @@ const firstTest=(async()=>{await new Promise(r=>setImmediate(r));assert.equal(el
   const confirmSave=entry.children[2].children.find(x=>x.tag==='button');await confirmSave.onclick();
   const req=requests[requests.length-1];assert.equal(req.key,'/accounts/1/messages/10/import-line');assert.equal(req.body.confirmed_iphone,true);assert.equal(req.body.line,52);
   console.log('Price preview pagination and iPhone confirmation passed');
+  data['/destination/topics']={topics:[{thread_id:41,title:'Техника',closed:false}],rules:[],publication_enabled:false};
+  data['/products']=[{id:1,brand:'Apple',category:'Смартфоны'}];
+  context.destinationForTest={connected:true,is_forum:true};await vm.runInContext('loadTopics(destinationForTest)',context);
+  const topicForm=elements.topicSettings.children.find(x=>x.className==='form-stack');
+  const selectors=topicForm.children.filter(x=>x.tag==='select');assert(selectors[1].children.some(x=>x.value==='Apple'&&x.textContent==='Apple'));assert(selectors[2].children.some(x=>x.value==='Смартфоны'));assert.equal(selectors[1].children[0].disabled,false);selectors[1].value='Apple';selectors[2].value='Смартфоны';selectors[3].value='41';
+  await topicForm.children.find(x=>x.textContent==='Сохранить правило').onclick();
+  const topicReq=requests[requests.length-1];assert.equal(topicReq.key,'/destination/routes');assert.equal(topicReq.body.brand,'Apple');assert.equal(topicReq.body.category,'Смартфоны');assert.equal(topicReq.body.thread_id,41);
+  console.log('Topic routing selection passed');
+
 
 })().catch(e=>{console.error(e);process.exitCode=1});
 

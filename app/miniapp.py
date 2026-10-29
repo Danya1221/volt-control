@@ -19,10 +19,10 @@ from aiogram.exceptions import TelegramAPIError
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Integer, String, Text, DateTime, Numeric, ForeignKey, select, text
+from sqlalchemy import BigInteger, Integer, String, Text, DateTime, Numeric, ForeignKey, UniqueConstraint, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
-from telethon import TelegramClient
+from telethon import TelegramClient, functions
 from telethon.errors import SessionPasswordNeededError, PasswordHashInvalidError
 from telethon.sessions import StringSession
 
@@ -37,6 +37,7 @@ attempts = {}
 workers = {}
 worker_states = {}
 worker_details = {}
+worker_clients = {}
 locks = {1: asyncio.Lock(), 2: asyncio.Lock()}
 destination_lock = asyncio.Lock()
 
@@ -120,6 +121,50 @@ class CatalogDestination(Base):
     is_forum: Mapped[bool] = mapped_column(default=False)
     can_manage_topics: Mapped[bool] = mapped_column(default=False)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CatalogTopic(Base):
+    __tablename__ = 'catalog_topics'
+    __table_args__ = (UniqueConstraint('chat_id', 'thread_id'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    thread_id: Mapped[int] = mapped_column(BigInteger)
+    title: Mapped[str] = mapped_column(String(255))
+    closed: Mapped[bool | None] = mapped_column(nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CatalogTopicRule(Base):
+    __tablename__ = 'catalog_topic_rules'
+    __table_args__ = (UniqueConstraint('chat_id', 'brand_key', 'category_key', 'product_id'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    brand: Mapped[str] = mapped_column(String(200), default='')
+    category: Mapped[str] = mapped_column(String(100), default='')
+    brand_key: Mapped[str] = mapped_column(String(200), default='')
+    category_key: Mapped[str] = mapped_column(String(100), default='')
+    thread_id: Mapped[int] = mapped_column(BigInteger)
+    product_id: Mapped[int] = mapped_column(Integer, default=0)
+
+
+def topic_for_product(db, chat_id, brand, category, product_id=None):
+    # SKU first, then brand+category, brand, and category. No implicit default.
+    if product_id:
+        rule = db.scalar(select(CatalogTopicRule).where(CatalogTopicRule.chat_id == chat_id, CatalogTopicRule.product_id == product_id))
+        if rule:
+            topic = db.scalar(select(CatalogTopic).where(CatalogTopic.chat_id == chat_id, CatalogTopic.thread_id == rule.thread_id))
+            return topic if topic and topic.closed is not True else None
+    brand, category = brand.strip().casefold(), category.strip().casefold()
+    for b, c in ((brand, category), (brand, ''), ('', category)):
+        if not (b or c):
+            continue
+        rule = db.scalar(select(CatalogTopicRule).where(CatalogTopicRule.chat_id == chat_id,
+                            CatalogTopicRule.brand_key == b, CatalogTopicRule.category_key == c, CatalogTopicRule.product_id == 0))
+        if rule:
+            topic = db.scalar(select(CatalogTopic).where(CatalogTopic.chat_id == chat_id,
+                                                         CatalogTopic.thread_id == rule.thread_id))
+            return topic if topic and topic.closed is not True else None
+    return None
 
 
 def verify_init_data(raw, token, owner_id, now=None):
@@ -222,6 +267,158 @@ async def unbind_destination():
     return {'connected': False, 'publication_enabled': False}
 
 
+def current_forum(db):
+    destination = db.get(CatalogDestination, 1)
+    if not destination:
+        raise HTTPException(409, 'Сначала привяжите чат каталога')
+    if not destination.is_forum:
+        raise HTTPException(422, 'В привязанном чате не включены темы')
+    return destination
+
+
+def save_topic(db, chat_id, thread_id, title, closed=None):
+    topic = db.scalar(select(CatalogTopic).where(CatalogTopic.chat_id == chat_id, CatalogTopic.thread_id == thread_id))
+    if topic is None:
+        topic = CatalogTopic(chat_id=chat_id, thread_id=thread_id)
+        db.add(topic)
+    topic.title = title[:255]
+    topic.closed = closed
+    topic.checked_at = datetime.now(timezone.utc)
+    return topic
+
+
+def topic_data(db, destination):
+    topics = db.scalars(select(CatalogTopic).where(CatalogTopic.chat_id == destination.chat_id).order_by(CatalogTopic.title)).all()
+    rules = db.scalars(select(CatalogTopicRule).where(CatalogTopicRule.chat_id == destination.chat_id).order_by(CatalogTopicRule.id)).all()
+    return {'chat_id': str(destination.chat_id),
+            'topics': [{'thread_id': t.thread_id, 'title': t.title, 'closed': t.closed} for t in topics],
+            'rules': [{'id': r.id, 'brand': r.brand, 'category': r.category, 'product_id': r.product_id, 'thread_id': r.thread_id} for r in rules],
+            'publication_enabled': False}
+
+
+@router.get('/destination/topics', dependencies=[Depends(owner)])
+def list_catalog_topics():
+    with Sessions() as db:
+        return topic_data(db, current_forum(db))
+
+
+@router.post('/destination/topics/sync', dependencies=[Depends(owner)])
+async def sync_catalog_topics():
+    async with destination_lock:
+        with Sessions() as db:
+            destination = current_forum(db)
+            chat_id = destination.chat_id
+        clients = [c for c in worker_clients.values() if c and c.is_connected()]
+        if not clients:
+            raise HTTPException(409, 'Нет работающего аккаунта для чтения тем. Можно добавить тему командой в группе.')
+        result = None
+        for client in clients:
+            try:
+                async def fetch():
+                    await client.get_dialogs()
+                    peer = await client.get_input_entity(chat_id)
+                    return await client(functions.messages.GetForumTopicsRequest(peer=peer, offset_date=None, offset_id=0, offset_topic=0, limit=100))
+                result = await asyncio.wait_for(fetch(), timeout=25)
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.info('Could not read forum topics with reader (%s)', type(exc).__name__)
+        if result is None:
+            raise HTTPException(422, 'Подключённый аккаунт не смог открыть темы. Добавьте его в группу или используйте команду в теме.')
+        count = 0
+        with Sessions() as db:
+            destination = current_forum(db)
+            if destination.chat_id != chat_id:
+                raise HTTPException(409, 'Привязанный чат изменился. Повторите загрузку.')
+            seen_ids = set()
+            for topic in result.topics:
+                title, tid = getattr(topic, 'title', None), getattr(topic, 'id', None)
+                if title and isinstance(tid, int) and tid > 0:
+                    save_topic(db, chat_id, tid, title, bool(getattr(topic, 'closed', False)))
+                    seen_ids.add(tid)
+                    count += 1
+            if result.count <= len(result.topics):
+                # A complete refresh can invalidate cached topics that no longer exist.
+                for old in db.scalars(select(CatalogTopic).where(CatalogTopic.chat_id == chat_id)).all():
+                    if old.thread_id not in seen_ids:
+                        old.closed = True
+            db.commit()
+            data = topic_data(db, destination)
+        data['loaded_count'] = count
+        data['total_count'] = result.count
+        data['incomplete'] = result.count > len(result.topics)
+        return data
+
+
+class TopicRuleIn(BaseModel):
+    brand: str = Field(default='', max_length=200)
+    category: str = Field(default='', max_length=100)
+    thread_id: int = Field(gt=0)
+    product_id: int = Field(default=0, ge=0)
+
+
+@router.put('/destination/routes', dependencies=[Depends(owner)])
+async def save_topic_rule(body: TopicRuleIn):
+    brand, category = body.brand.strip(), body.category.strip()
+    if not brand and not category and not body.product_id:
+        raise HTTPException(422, 'Выберите товар, бренд или категорию')
+    if body.product_id and (brand or category):
+        raise HTTPException(422, 'Для отдельного товара не выбирайте бренд и категорию')
+    async with destination_lock:
+        with Sessions() as db:
+            destination = current_forum(db)
+            topic = db.scalar(select(CatalogTopic).where(CatalogTopic.chat_id == destination.chat_id,
+                                                          CatalogTopic.thread_id == body.thread_id))
+            if not topic or topic.closed is True:
+                raise HTTPException(422, 'Тема не найдена или закрыта. Обновите список тем')
+            if body.product_id and db.get(Product, body.product_id) is None:
+                raise HTTPException(404, 'Товар не найден')
+            bk, ck = brand.casefold(), category.casefold()
+            row = db.scalar(select(CatalogTopicRule).where(CatalogTopicRule.chat_id == destination.chat_id,
+                                                            CatalogTopicRule.brand_key == bk, CatalogTopicRule.category_key == ck,
+                                                            CatalogTopicRule.product_id == body.product_id))
+            if row is None:
+                row = CatalogTopicRule(chat_id=destination.chat_id, brand_key=bk, category_key=ck, product_id=body.product_id)
+                db.add(row)
+            row.brand, row.category, row.thread_id = brand, category, body.thread_id
+            db.commit()
+            return {'ok': True}
+
+
+@router.delete('/destination/routes/{rule_id}', dependencies=[Depends(owner)])
+async def delete_topic_rule(rule_id: int):
+    async with destination_lock:
+        with Sessions() as db:
+            destination = current_forum(db)
+            row = db.scalar(select(CatalogTopicRule).where(CatalogTopicRule.id == rule_id, CatalogTopicRule.chat_id == destination.chat_id))
+            if row is None:
+                raise HTTPException(404, 'Правило не найдено')
+            db.delete(row)
+            db.commit()
+    return {'ok': True}
+
+
+async def register_catalog_topic(chat_id, thread_id, title, bot):
+    async with destination_lock:
+        with Sessions() as db:
+            destination = current_forum(db)
+            if destination.chat_id != chat_id:
+                raise HTTPException(422, 'Это не привязанный чат каталога')
+        try:
+            checked = await asyncio.wait_for(verify_destination(bot, chat_id), timeout=15)
+        except (TelegramAPIError, asyncio.TimeoutError):
+            raise HTTPException(422, 'Не удалось проверить права в чате') from None
+        if not checked['is_forum']:
+            raise HTTPException(422, 'В этом чате не включены темы')
+        with Sessions() as db:
+            destination = current_forum(db)
+            if destination.chat_id != chat_id:
+                raise HTTPException(409, 'Привязанный чат изменился')
+            save_topic(db, chat_id, thread_id, title, None)
+            db.commit()
+
+
 def settings():
     try:
         api_id = int(os.environ['TG_API_ID'])
@@ -268,7 +465,8 @@ async def reader_worker(slot):
                 worker_states[slot] = 'partial' if worker_details[slot].get('inaccessible_chats') else 'monitoring'
             await guarded_monitor(slot, data, {'name': f"miniapp-{data['telegram_id']}", 'chats': data['chats'],
                                    'session_string': session_string, 'api_id': api_id,
-                                   'api_hash': api_hash, 'on_chats': chats_checked, 'on_ready': ready})
+                                   'api_hash': api_hash, 'on_chats': chats_checked, 'on_ready': ready,
+                                   'on_client': lambda client: worker_clients.__setitem__(slot, client) if client else worker_clients.pop(slot, None)})
             worker_states[slot] = 'disconnected'
         except asyncio.CancelledError:
             raise
