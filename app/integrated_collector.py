@@ -13,9 +13,15 @@ from datetime import datetime, timezone
 from sqlalchemy import BigInteger, DateTime, String, Text, UniqueConstraint, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError, UsernameInvalidError, UsernameNotOccupiedError, ChannelPrivateError
 from telethon.sessions import StringSession
 
 log = logging.getLogger(__name__)
+
+
+class NoAccessibleChats(Exception):
+    """None of the configured chats could be resolved."""
+
 
 class Base(DeclarativeBase):
     pass
@@ -83,9 +89,18 @@ async def monitor_account(config, db):
         # from dialogs so explicit numeric IDs also work after a restart.
         if any(isinstance(chat, int) for chat in chats):
             await client.get_dialogs()
+        inaccessible = []
         for chat in chats:
-            entity = await client.get_entity(chat)
-            entities[await client.get_peer_id(entity)] = entity
+            try:
+                entity = await client.get_entity(chat)
+                entities[await client.get_peer_id(entity)] = entity
+            except (ValueError, UsernameInvalidError, UsernameNotOccupiedError, ChannelPrivateError):
+                # A bad or inaccessible chat must not stop the other configured chats.
+                inaccessible.append(str(chat))
+        if config.get("on_chats"):
+            config["on_chats"](inaccessible)
+        if not entities:
+            raise NoAccessibleChats()
 
         @client.on(events.NewMessage(chats=list(entities.values())))
         async def on_new(event):
@@ -107,7 +122,14 @@ async def monitor_account(config, db):
         log.info("Telegram collector %s monitoring %s chats", name, len(entities))
         if config.get("on_ready"):
             config["on_ready"]()
-        await client.run_until_disconnected()
+        if inaccessible:
+            # Keep the working chats live and retry inaccessible ones periodically.
+            try:
+                await asyncio.wait_for(asyncio.shield(client.disconnected), timeout=120)
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await client.run_until_disconnected()
     finally:
         await client.disconnect()
 
@@ -128,4 +150,5 @@ async def run_collector(database_url):
         await asyncio.gather(*(monitor_account(account, db) for account in accounts))
     finally:
         engine.dispose()
+
 
