@@ -42,6 +42,11 @@ def test_import_on_disposable_postgres(monkeypatch):
             audit = db.scalar(select(miniapp.OfferImport))
             assert audit.chat_id == 12345678901
             assert audit.message_hash == content_hash
+            db.add(miniapp.CatalogDestination(id=1,chat_id=-10099,title='Local',is_forum=True,can_manage_topics=True,checked_at=datetime.now(timezone.utc)))
+            miniapp.save_topic(db,-10099,17,'Local topic',False)
+            db.add(miniapp.CatalogTopicRule(chat_id=-10099,brand='Apple',category='Смартфоны',brand_key='apple',category_key='смартфоны',product_id=0,thread_id=17))
+            db.commit()
+            assert miniapp.topic_for_product(db,-10099,'Apple','Смартфоны').thread_id == 17
     finally:
         CollectorBase.metadata.drop_all(engine)
         main.Base.metadata.drop_all(engine)
