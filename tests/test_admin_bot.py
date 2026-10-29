@@ -106,3 +106,57 @@ def test_chat_button_only_opens_owner_picker():
         await handler(correct)
         assert reply.answer.await_args.kwargs['reply_markup'].keyboard[0][0].request_chat.request_id == admin_bot.CHAT_REQUEST_ID
     asyncio.run(scenario())
+
+
+
+def test_forwarded_group_requires_confirmation_and_checks_owner(monkeypatch):
+    monkeypatch.setenv('VOLT_MINIAPP_ENABLED', '1')
+    admin_bot.forward_candidates.clear()
+    bind = AsyncMock(return_value={'title': 'Retail chat'})
+    monkeypatch.setattr(miniapp, 'bind_destination', bind)
+    async def scenario():
+        fwd = message()
+        fwd.forward_origin = SimpleNamespace(type='chat', sender_chat=SimpleNamespace(id=-10099, type='supergroup', title='Retail chat'))
+        await admin_bot.handle_forwarded_message(fwd, 123)
+        bind.assert_not_awaited()
+        kb = fwd.answer.await_args.kwargs['reply_markup']
+        data = kb.inline_keyboard[0][0].callback_data
+        assert data.startswith('forward_bind:')
+        reply = message()
+        outsider = SimpleNamespace(from_user=SimpleNamespace(id=456), message=reply, data=data, answer=AsyncMock())
+        await admin_bot.confirm_forwarded_chat(outsider, 123)
+        bind.assert_not_awaited()
+        assert outsider.answer.await_args.kwargs['show_alert'] is True
+        owner = SimpleNamespace(from_user=SimpleNamespace(id=123), message=reply, data=data, answer=AsyncMock())
+        await admin_bot.confirm_forwarded_chat(owner, 123)
+        assert bind.await_args.args[0].chat == '-10099'
+        assert 'Retail chat' in reply.answer.await_args.args[0]
+        await admin_bot.confirm_forwarded_chat(owner, 123)
+        assert bind.await_count == 1
+        assert owner.answer.await_args.kwargs['show_alert'] is True
+    asyncio.run(scenario())
+    admin_bot.forward_candidates.clear()
+
+
+def test_forward_without_source_offers_picker_without_binding(monkeypatch):
+    bind = AsyncMock()
+    monkeypatch.setattr(miniapp, 'bind_destination', bind)
+    async def scenario():
+        for origin in [SimpleNamespace(type='user', sender_user=SimpleNamespace(id=42)),
+                       SimpleNamespace(type='hidden_user'),
+                       SimpleNamespace(type='channel', chat=SimpleNamespace(id=-10000, type='channel'))]:
+            fwd = message()
+            fwd.forward_origin = origin
+            await admin_bot.handle_forwarded_message(fwd, 123)
+            assert 'не передал' in fwd.answer.await_args.args[0]
+            request = fwd.answer.await_args.kwargs['reply_markup'].keyboard[0][0].request_chat
+            assert request.request_id == admin_bot.CHAT_REQUEST_ID
+        bind.assert_not_awaited()
+    asyncio.run(scenario())
+
+
+def test_forward_handler_precedes_generic_and_commands():
+    dispatcher = admin_bot.create_dispatcher(123)
+    names = [item.callback.__name__ for item in dispatcher.message.handlers]
+    assert names.index('forwarded_message') < names.index('other')
+    assert names.index('forwarded_message') < names.index('start')

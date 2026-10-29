@@ -1,5 +1,7 @@
 """Owner-only Telegram controls, including safe catalog-chat selection."""
 import os
+import secrets
+import time
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -9,6 +11,8 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup, InlineK
 from fastapi import HTTPException
 
 CHAT_REQUEST_ID = 72103
+# One short-lived candidate per owner, never the message contents.
+forward_candidates = {}
 
 
 def is_owner(message, owner_id):
@@ -46,11 +50,58 @@ async def select_chat_command(message, owner_id):
     await show_chat_picker(message)
 
 
-async def show_chat_picker(message):
+async def show_chat_picker(message, prompt=None):
     button = KeyboardButton(text='Выбрать чат для каталога', request_chat=KeyboardButtonRequestChat(
         request_id=CHAT_REQUEST_ID, chat_is_channel=False, bot_is_member=True, request_title=True))
     keyboard = ReplyKeyboardMarkup(keyboard=[[button]], resize_keyboard=True, one_time_keyboard=True)
-    await message.answer('Нажми кнопку и выбери чат. Сначала добавь в него этого бота администратором.', reply_markup=keyboard)
+    await message.answer(prompt or 'Нажми кнопку и выбери чат. Сначала добавь в него этого бота администратором.', reply_markup=keyboard)
+
+
+async def handle_forwarded_message(message, owner_id):
+    if not is_owner(message, owner_id) or message.chat.type != 'private':
+        return
+    origin = message.forward_origin
+    # A forwarded user message often contains only the author, not its source
+    # group. MessageOriginChat identifies the sender chat, which can also be a
+    # different chat: ask the owner to confirm before persisting a destination.
+    candidate = getattr(origin, 'sender_chat', None) if getattr(origin, 'type', None) == 'chat' else None
+    if candidate is None or candidate.type not in ('group', 'supergroup') or candidate.id >= 0:
+        await show_chat_picker(message, 'Telegram не передал чат в пересланном сообщении. Выбери его кнопкой ниже. Сначала добавь в него бота администратором.')
+        return
+    for key, value in list(forward_candidates.items()):
+        if value['owner_id'] == owner_id or value['expires'] <= time.monotonic():
+            forward_candidates.pop(key, None)
+    nonce = secrets.token_urlsafe(12)
+    forward_candidates[nonce] = {'chat_id': candidate.id, 'owner_id': owner_id,
+                                  'expires': time.monotonic() + 300}
+    title = (candidate.title or 'чат')[:80]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='Привязать этот чат', callback_data='forward_bind:' + nonce)],
+        [InlineKeyboardButton(text='Выбрать другой чат', callback_data='select_catalog_chat')],
+    ])
+    await message.answer('Сообщение отправлено от имени чата «' + title + '». Это нужный чат для каталога?', reply_markup=keyboard)
+
+
+async def confirm_forwarded_chat(callback, owner_id):
+    if callback.from_user.id != owner_id or callback.message is None or callback.message.chat.type != 'private':
+        await callback.answer('Доступ закрыт.', show_alert=True)
+        return
+    nonce = (callback.data or '').removeprefix('forward_bind:')
+    candidate = forward_candidates.pop(nonce, None)
+    if not candidate or candidate['owner_id'] != owner_id or candidate['expires'] <= time.monotonic():
+        await callback.answer('Подтверждение устарело. Перешли сообщение заново.', show_alert=True)
+        return
+    if os.getenv('VOLT_MINIAPP_ENABLED') != '1':
+        await callback.answer('Mini App выключено.', show_alert=True)
+        return
+    await callback.answer()
+    from app.miniapp import bind_destination, DestinationIn
+    try:
+        result = await bind_destination(DestinationIn(chat=str(candidate['chat_id'])))
+    except HTTPException as exc:
+        await callback.message.answer(str(exc.detail) + '\nПовтори пересылку или выбери чат через /connectgroup.')
+        return
+    await callback.message.answer('Чат «' + result['title'] + '» привязан. Публикация пока выключена.')
 
 
 async def accept_selected_chat(message, owner_id):
@@ -74,6 +125,10 @@ async def accept_selected_chat(message, owner_id):
 def create_dispatcher(owner_id):
     dp = Dispatcher()
 
+    @dp.message(F.forward_origin)
+    async def forwarded_message(message: Message):
+        await handle_forwarded_message(message, owner_id)
+
     @dp.message(Command('myid'))
     async def myid(message: Message):
         if message.from_user:
@@ -90,7 +145,7 @@ def create_dispatcher(owner_id):
                 [InlineKeyboardButton(text='Открыть VOLT Control', web_app=WebAppInfo(url=url))],
                 [InlineKeyboardButton(text='Привязать чат', callback_data='select_catalog_chat')],
             ])
-            await message.answer('⚡ VOLT Control\n\nОткрой панель или выбери чат для каталога.', reply_markup=keyboard)
+            await message.answer('⚡ VOLT Control\n\nОткрой панель, перешли сообщение из чата или выбери чат для каталога.', reply_markup=keyboard)
         else:
             await message.answer('⚡ VOLT Control\n\nMini App ещё не настроено. Коды авторизации и пароли в чат не отправляй.')
 
@@ -109,6 +164,10 @@ def create_dispatcher(owner_id):
             return
         await callback.answer()
         await show_chat_picker(callback.message)
+
+    @dp.callback_query(F.data.startswith('forward_bind:'))
+    async def bind_forwarded_chat(callback: CallbackQuery):
+        await confirm_forwarded_chat(callback, owner_id)
 
     @dp.message(F.chat_shared)
     async def chat_shared(message: Message):
@@ -144,3 +203,4 @@ async def run_bot(on_started=None):
         await dp.start_polling(bot, handle_signals=False)
     finally:
         await bot.session.close()
+
