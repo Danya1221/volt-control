@@ -40,13 +40,14 @@ def test_inaccessible_chat_does_not_stop_other_chat(monkeypatch):
 
 
 def test_reader_exposes_safe_error_category(monkeypatch):
-    async def fail(config, db):
+    async def fail(slot, data, config):
         raise ValueError('sensitive details')
     async def cancel(delay):
         raise asyncio.CancelledError()
     monkeypatch.setattr(miniapp, 'saved', lambda slot: {'telegram_id':'1','chats':['@x'],'session':'x'})
     monkeypatch.setattr(miniapp, 'settings', lambda: (1, 'x', SimpleNamespace(decrypt=lambda _: b'session')))
-    monkeypatch.setattr(miniapp, 'monitor_account', fail)
+    monkeypatch.setattr(miniapp, 'reader_enabled', lambda slot: True)
+    monkeypatch.setattr(miniapp, 'guarded_monitor', fail)
     monkeypatch.setattr(miniapp.asyncio, 'sleep', cancel)
     try:
         asyncio.run(miniapp.reader_worker(1))
