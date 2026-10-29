@@ -274,3 +274,28 @@ def test_group_binding_checks_access_and_never_publishes(monkeypatch):
     assert client.delete(path, headers=headers).json()['connected'] is False
     engine.dispose()
 
+
+
+
+def test_reader_upgrade_pauses_until_owner_resumes(monkeypatch):
+    monkeypatch.setenv('VOLT_MINIAPP_ENABLED', '1')
+    monkeypatch.setenv('TG_BOT_TOKEN', 'bot-token')
+    monkeypatch.setenv('VOLT_OWNER_TG_ID', '123')
+    engine = create_engine('sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool)
+    miniapp.Base.metadata.create_all(engine)
+    db_factory = sessionmaker(engine)
+    monkeypatch.setattr(miniapp, 'Sessions', db_factory)
+    with db_factory() as db:
+        db.add(miniapp.ReaderAccount(slot=1, telegram_id='42', display_name='Reader', encrypted_session='unused', chats_json='["@supplier"]'))
+        db.commit()
+    calls = []
+    async def restart(slot):
+        calls.append(slot)
+    monkeypatch.setattr(miniapp, 'restart_worker', restart)
+    client = TestClient(app)
+    assert not miniapp.reader_enabled(1)
+    assert client.post('/miniapp/api/accounts/1/resume').status_code == 401
+    assert client.post('/miniapp/api/accounts/1/resume', headers={'X-Telegram-Init-Data': signed()}).status_code == 200
+    assert miniapp.reader_enabled(1)
+    assert calls == [1]
+    engine.dispose()
