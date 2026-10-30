@@ -5,6 +5,7 @@ class Element{
  remove(){if(this.parent)this.parent.children=this.parent.children.filter(x=>x!==this)}
  replaceChildren(...children){this.children=[...children]}
  setAttribute(k,v){this.attributes[k]=v}
+ querySelector(q){for(const c of this.children){if(q.startsWith('.')&&(c.className||'').split(' ').includes(q.slice(1)))return c;const nested=c.querySelector?.(q);if(nested)return nested}return null}
 }
 const ids=['accounts','error','metrics','catalog','pricing','pricingRules','reviews','destination','topicSettings','fullscreenBtn','reviewsBtn','pricingBtn','catalogBtn','reload',...['home','catalog','pricing','suppliers','reviews','preview'].map(s=>'tab-'+s)];
 const elements=Object.fromEntries(ids.map(id=>[id,new Element('div')]));
@@ -91,6 +92,19 @@ const firstTest=(async()=>{await new Promise(r=>setImmediate(r));assert.equal(el
   const syncButton=elements.topicSettings.children.find(x=>x.textContent==='Загрузить темы из Telegram');await syncButton.onclick();
   assert.equal(syncButton.disabled,false);assert.match(all(elements.topicSettings),/Проверьте доступ аккаунта к группе/);
   console.log('Topic load failure shown beside button passed');
+  data['/accounts']=[{connected:true,slot:1,name:'Ilya'}];
+  data['/destination/topics']={topics:[{thread_id:41,title:'Apple',closed:false}],rules:[],publication_enabled:false};
+  data['/products']=[];
+  const joinActions=[];
+  context.fetch=async(url,opts={})=>{const key=url.replace('/miniapp/api','');if(opts.method){joinActions.push(key);if(key.endsWith('/join/1'))return {ok:true,json:async()=>({ok:true,already_member:false})};if(key.endsWith('/topics/sync'))return {ok:true,json:async()=>({loaded_count:1,incomplete:false})}}return {ok:true,json:async()=>data[key]}};
+  context.destinationForTest={connected:true,is_forum:true,title:'Quantumm'};
+  await vm.runInContext('loadTopics(destinationForTest)',context);
+  let joinForm=elements.topicSettings.children.find(x=>x.className==='form-stack'&&all(x).includes('Добавить аккаунт в чат'));
+  assert(joinForm);context.confirm=()=>false;await joinForm.children.find(x=>x.textContent==='Добавить аккаунт в чат').onclick();assert.deepEqual(joinActions,[]);
+  context.confirm=()=>true;await joinForm.children.find(x=>x.textContent==='Добавить аккаунт в чат').onclick();
+  assert.deepEqual(joinActions,['/destination/topics/join/1','/destination/topics/sync']);assert.match(all(elements.topicSettings),/Тем загружено: 1/);
+  console.log('Explicit topic account join and reload passed');
+
 
 
 
