@@ -7,13 +7,13 @@ class Element{
  setAttribute(k,v){this.attributes[k]=v}
  querySelector(q){for(const c of this.children){if(q.startsWith('.')&&(c.className||'').split(' ').includes(q.slice(1)))return c;const nested=c.querySelector?.(q);if(nested)return nested}return null}
 }
-const ids=['accounts','error','metrics','catalog','pricing','pricingRules','reviews','destination','topicSettings','fullscreenBtn','reviewsBtn','pricingBtn','catalogBtn','reload',...['home','catalog','pricing','suppliers','reviews','preview'].map(s=>'tab-'+s)];
+const ids=['accounts','error','metrics','catalog','pricing','pricingRules','reviews','destination','topicSettings','publication','fullscreenBtn','reviewsBtn','pricingBtn','catalogBtn','reload',...['home','catalog','pricing','suppliers','reviews','preview'].map(s=>'tab-'+s)];
 const elements=Object.fromEntries(ids.map(id=>[id,new Element('div')]));
 const buttons=['home','catalog','pricing','suppliers','reviews','preview'].map(x=>{let e=new Element('button');e.dataset.tab=x;return e});
 const shortcuts=['reviews','suppliers','catalog'].map(x=>{let e=new Element('button');e.dataset.go=x;return e});
 const doc={getElementById:id=>elements[id],createElement:tag=>new Element(tag),querySelectorAll:q=>q==='[data-tab]'?buttons:shortcuts};
 const p={id:1,model:'Example',category:'Example',approved:true,hidden:false,price:'70',status:'priced',sim:''};
-const data={'/destination':{connected:false,publication_enabled:false},'/accounts':[{connected:true}],'/products':[p],'/markups':[],'/pricing/overview':{total:1,priced:1,review:0,items:[{id:1,price:'90',status:'priced'}]}};
+const data={'/destination':{connected:false,publication_enabled:false},'/publication':{enabled:false,published:0,pending:0,items:[]},'/accounts':[{connected:true}],'/products':[p],'/markups':[],'/pricing/overview':{total:1,priced:1,review:0,items:[{id:1,price:'90',status:'priced'}]}};
 const code=fs.readFileSync('app/static/miniapp.html','utf8').split('<script>').pop().split('</script>')[0];
 const context={document:doc,window:{Telegram:{WebApp:{initData:'test',ready(){},expand(){}}}},fetch:async url=>{let key=url.replace('/miniapp/api','');if(!(key in data))throw Error('Unexpected '+key);return {ok:true,json:async()=>data[key]}},console,setTimeout,clearTimeout,confirm:()=>false,Date,Map,encodeURIComponent};
 vm.createContext(context);vm.runInContext(code,context);
@@ -109,6 +109,29 @@ const firstTest=(async()=>{await new Promise(r=>setImmediate(r));assert.equal(el
   assert(topicCalls.filter(x=>x.key==='/destination/topics').every(x=>x.method==='GET'));
   assert(!topicCalls.some(x=>x.key==='/accounts'||x.key.includes('/join/')||x.key.includes('/sync')));
   console.log('Bot topic list refresh uses saved topics without account or sync passed');
+
+  const publicationCalls=[];let failPublish=false;
+  data['/publication']={enabled:false,published:2,uncertain:0,errors:0,retry_after:0,price_mode:'verified_only',problem_products:[],items:[{name:'iPhone 17 256',topic:'Apple',price:'90 000 ₽',status:'готов'}]};
+  context.fetch=async(url,opts={})=>{const key=url.replace('/miniapp/api','');publicationCalls.push({key,method:opts.method||'GET'});if(key==='/publication/enable'&&failPublish)return {ok:false,json:async()=>({detail:'Бот не имеет доступа'})};if(key==='/publication/enable')data['/publication'].enabled=true;if(key==='/publication/pause')data['/publication'].enabled=false;return {ok:true,json:async()=>data[key]||{ok:true}}};
+  await vm.runInContext('loadPublication()',context);
+  assert.match(all(elements.publication),/Публикация приостановлена/);
+  assert.match(all(elements.publication),/Без подтверждённой цены товар показывается «По запросу»/);
+  assert(!publicationCalls.some(x=>x.method==='POST'));
+  await elements.publication.children.find(x=>x.textContent==='Предпросмотр').onclick();
+  assert.match(all(elements.publication),/iPhone 17 256.*Apple.*90 000/);
+  assert(!elements.publication.children.some(x=>x.textContent==='Обновить публикацию'));
+  failPublish=true;await elements.publication.children.find(x=>x.textContent==='Включить публикацию').onclick();
+  assert.match(all(elements.publication),/Не удалось включить публикацию: Бот не имеет доступа/);
+  failPublish=false;await elements.publication.children.find(x=>x.textContent==='Включить публикацию').onclick();
+  assert.match(all(elements.publication),/Публикация включена/);
+  assert(!publicationCalls.some(x=>x.key==='/publication/sync'));
+  data['/publication'].errors=1;data['/publication'].uncertain=2;data['/publication'].retry_after=30;data['/publication'].problem_products=[{state:'send_failed',error:'TelegramForbiddenError'}];
+  await elements.publication.children.find(x=>x.textContent==='Обновить публикацию').onclick();
+  assert.match(all(elements.publication),/Ошибок публикации: 1/);assert.match(all(elements.publication),/Не удалось подтвердить результат отправки для 2/);assert.match(all(elements.publication),/30 сек/);assert.match(all(elements.publication),/TelegramForbiddenError/);
+  await elements.publication.children.find(x=>x.textContent==='Приостановить').onclick();
+  assert.match(all(elements.publication),/Публикация приостановлена/);
+  assert.equal(publicationCalls.filter(x=>x.key==='/publication/sync'&&x.method==='POST').length,1);
+  console.log('Publication preview and explicit sync passed');
 
 
 

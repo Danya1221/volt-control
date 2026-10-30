@@ -125,16 +125,37 @@ async def collector_supervisor():
             logger.exception("Integrated Telegram collector failed; retrying in 30 seconds")
         await asyncio.sleep(30)
 
+
+async def publication_supervisor():
+    from aiogram import Bot
+    from app.publisher import publication_enabled, reconcile_publication
+    bot = Bot(token=os.environ['TG_BOT_TOKEN'])
+    try:
+        while True:
+            try:
+                if publication_enabled():
+                    await reconcile_publication(bot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error('Catalog publication failed (%s)', type(exc).__name__)
+            await asyncio.sleep(30)
+    finally:
+        await bot.session.close()
+
 @asynccontextmanager
 async def lifespan(app):
     task = None
     bot_task = None
+    publication_task = None
     from app import miniapp
     await miniapp.start()
     if os.getenv("VOLT_BOT_ENABLED") == "1":
         if not os.getenv("TG_BOT_TOKEN") or not os.getenv("VOLT_OWNER_TG_ID", "").isdigit():
             raise RuntimeError("TG_BOT_TOKEN and VOLT_OWNER_TG_ID required to enable bot")
         bot_task = asyncio.create_task(bot_supervisor())
+        if os.getenv('VOLT_MINIAPP_ENABLED') == '1':
+            publication_task = asyncio.create_task(publication_supervisor())
     if os.getenv("VOLT_COLLECTOR_ENABLED") == "1":
         if os.getenv("WEB_CONCURRENCY", "1") != "1":
             raise RuntimeError("Integrated collector requires exactly one API worker")
@@ -146,7 +167,7 @@ async def lifespan(app):
         yield
     finally:
         await miniapp.stop()
-        for running in (task, bot_task):
+        for running in (task, bot_task, publication_task):
             if running:
                 running.cancel()
                 with suppress(asyncio.CancelledError):
@@ -266,9 +287,13 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 from app.miniapp import router as miniapp_router
 from app.pricing import router as pricing_router
+from app.publisher import router as publication_router
+
+Base.metadata.create_all(engine)
 
 app.include_router(miniapp_router)
 app.include_router(pricing_router)
+app.include_router(publication_router)
 
 @app.middleware('http')
 async def no_cache_miniapp(request, call_next):

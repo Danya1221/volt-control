@@ -40,10 +40,10 @@ body{max-width:1240px;box-sizing:border-box;padding:20px 16px 48px}
 </nav>
 <div id="tab-home"><section class="card"><h2>Главная</h2><p class="muted">Данные из рабочей базы. Товары из прототипа сюда не добавляются.</p><div class="metrics" id="metrics"><span class="muted">Загружаем данные…</span></div><div class="actions"><button type="button" data-go="reviews" class="secondary">Проверки</button><button type="button" data-go="suppliers" class="secondary">Поставщики</button><button type="button" data-go="catalog" class="secondary">Каталог</button></div></section></div>
 <div id="tab-suppliers" hidden><p class="notice muted">Подключайте аккаунты и просматривайте полученные сообщения. Разбор прайса предварительный.</p><button id="reload" class="secondary" type="button">Обновить статус</button><div id="accounts"></div></div>
-<div id="tab-catalog" hidden><section class="card"><h2>Товары</h2><p class="muted">Новые позиции требуют вашего одобрения. Публикация каталога пока не подключена.</p><button id="catalogBtn" class="secondary" type="button">Обновить товары</button><div id="catalog"></div></section></div>
+<div id="tab-catalog" hidden><section class="card"><h2>Товары</h2><p class="muted">Новые позиции требуют вашего одобрения.</p><button id="catalogBtn" class="secondary" type="button">Обновить товары</button><div id="catalog"></div></section></div>
 <div id="tab-pricing" hidden><section class="card"><h2>Обзор цен</h2><p class="muted">Актуальные предложения, московское время и режим расчёта.</p><button id="pricingBtn" class="secondary" type="button">Обновить обзор</button><div id="pricing"></div></section><section class="card"><h2>Акции и ночной резерв</h2><div id="pricingRules"></div></section></div>
 <div id="tab-reviews" hidden><section class="card"><h2>Проверки товаров</h2><p class="muted">Новые товары остаются в очереди до одобрения. Для сверки откройте исходное сообщение в разделе «Поставщики».</p><button id="reviewsBtn" class="secondary" type="button">Обновить очередь</button><div id="reviews"></div></section></div>
-<div id="tab-preview" hidden><section class="card"><h2>Привязка чата каталога</h2><p class="muted">Добавь @prostootdushi22_bot администратором в чат. В личном чате с ботом перешли сообщение из нужного чата. Если Telegram не передаст источник, нажми <b>«Выбрать чат»</b> и укажи чат в списке. Поддерживаются чаты с темами.</p><div id="destination" class="destination-form"></div></section><section class="card"><h2>Темы и товары</h2><div id="topicSettings"></div></section><section class="card"><h2>Публикация</h2><p class="muted">Привязка сохраняет чат. Публикация товаров и распределение по темам пока не подключены.</p></section></div>
+<div id="tab-preview" hidden><section class="card"><h2>Привязка чата каталога</h2><p class="muted">Добавь @prostootdushi22_bot администратором в чат. В личном чате с ботом перешли сообщение из нужного чата. Если Telegram не передаст источник, нажми <b>«Выбрать чат»</b> и укажи чат в списке. Поддерживаются чаты с темами.</p><div id="destination" class="destination-form"></div></section><section class="card"><h2>Темы и товары</h2><div id="topicSettings"></div></section><section class="card"><h2>Публикация</h2><div id="publication"></div></section></div>
 <script>
 'use strict';
 const tg=window.Telegram?.WebApp; tg?.ready(); tg?.expand();
@@ -204,8 +204,8 @@ async function loadDestination(){
  const chat=el('input');chat.placeholder='ID или публичный @username чата';chat.value=data.connected?data.chat_id:'';chat.maxLength=128;chat.autocomplete='off';
  box.append(el('p','Или привяжи чат по ID / @username','label'),chat,btn('Проверить и привязать',async()=>{if(!chat.value.trim())throw Error('Укажите ID или @username чата');await api('/destination',{method:'PUT',body:JSON.stringify({chat:chat.value.trim()})});await loadDestination()}));
  if(data.connected)box.append(btn('Отвязать чат',async()=>{if(!confirm('Отвязать чат от VOLT? Сам чат и его сообщения останутся в Telegram.'))return;await api('/destination',{method:'DELETE'});await loadDestination()},'secondary'));
- box.append(el('p','Публикация выключена. После изменения прав бота повтори проверку.','muted'));
  await loadTopics(data);
+ await loadPublication();
 }
 
 async function loadTopics(destination){
@@ -234,7 +234,43 @@ async function loadTopics(destination){
  topic.value=String(topicOptions[0].thread_id);
  product.onchange=()=>{if(product.value){brand.value='';category.value=''}};brand.onchange=category.onchange=()=>{if(brand.value||category.value)product.value=''};
  form.append(el('p','Товар','label'),product,el('p','Бренд','label'),brand,el('p','Категория','label'),category,el('p','Тема','label'),topic,el('p','Приоритет: товар → бренд и категория → бренд → категория.','muted'),btn('Сохранить правило',async()=>{if(!product.value&&!brand.value&&!category.value)throw Error('Выберите товар, бренд или категорию');await api('/destination/routes',{method:'PUT',body:JSON.stringify({product_id:Number(product.value)||0,brand:brand.value,category:category.value,thread_id:Number(topic.value)})});await loadTopics(destination)}));box.append(form);
- box.append(el('p','Правила сохранены для будущей публикации. Автоматическая публикация в темы пока не подключена.','muted'));
+ box.append(el('p','Правила сохранены для публикации.','muted'));
+}
+
+async function loadPublication(showItems=false){
+ const box=document.getElementById('publication');box.replaceChildren();
+ const status=el('p','Загружаем статус…','muted');box.append(status);
+ try{
+  const data=await api('/publication');
+  status.textContent=(data.enabled?'Публикация включена.':'Публикация приостановлена.')+' Опубликовано: '+(data.published??0)+'.';
+  if(data.errors)box.append(el('p','Ошибок публикации: '+data.errors+'. Проверь права бота и состояние товаров.','error'));
+  if(data.uncertain)box.append(el('p','Не удалось подтвердить результат отправки для '+data.uncertain+' товаров. Повторная отправка не производится автоматически.','error'));
+  if(data.retry_after)box.append(el('p','Telegram ограничил отправку. Повтор возможен примерно через '+data.retry_after+' сек.','muted'));
+  const problems=data.problem_products||[];
+  if(problems.length){const codes=[...new Set(problems.map(p=>p.error).filter(Boolean))];if(codes.length)box.append(el('p','Код ошибки: '+codes.join(', '),'error'))}
+  box.append(el('p','Проверь товары и темы перед отправкой. Публикуются подходящие одобренные товары. Без подтверждённой цены товар показывается «По запросу».','muted'));
+  box.append(btn('Предпросмотр',async()=>{await loadPublication(true)},'secondary'));
+  if(!data.enabled)box.append(btn('Включить публикацию',async()=>{
+   status.className='muted';status.textContent='Включаем публикацию…';
+   try{await api('/publication/enable',{method:'POST'});await loadPublication(showItems)}catch(e){status.className='error';status.textContent='Не удалось включить публикацию: '+e.message}
+  }));
+  else{
+   box.append(btn('Обновить публикацию',async()=>{
+    status.className='muted';status.textContent='Обновляем публикацию…';
+    try{await api('/publication/sync',{method:'POST'});await loadPublication(showItems)}catch(e){status.className='error';status.textContent='Не удалось обновить публикацию: '+e.message}
+   }));
+   box.append(btn('Приостановить',async()=>{
+    status.className='muted';status.textContent='Останавливаем публикацию…';
+    try{await api('/publication/pause',{method:'POST'});await loadPublication(showItems)}catch(e){status.className='error';status.textContent='Не удалось остановить публикацию: '+e.message}
+   },'secondary'));
+  }
+  if(showItems){
+   const items=data.items||[];
+   box.append(el('p',items.length?'Предпросмотр товаров:':'Нет товаров для публикации.','label'));
+   const labels={new:'готов к публикации',sent:'опубликован',pending:'отправляется',uncertain:'результат не подтверждён',send_failed:'ошибка отправки',edit_failed:'ошибка обновления',delete_failed:'ошибка удаления'};
+   for(const item of items){const price=String(item.price??'По запросу');const displayPrice=/^\d+(?:[.,]\d+)?$/.test(price)?price+' ₽':price;const row=el('p',(item.name||'Товар')+' · '+(item.topic||'Тема не выбрана')+' · '+displayPrice+(item.status?' · '+(labels[item.status]||item.status):''),'muted');box.append(row)}
+  }
+ }catch(e){status.className='error';status.textContent='Не удалось загрузить публикацию: '+e.message}
 }
 
 function showTab(name){
