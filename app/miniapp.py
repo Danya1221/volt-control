@@ -388,136 +388,64 @@ def list_catalog_topics():
 
 @router.post('/destination/topics/sync', dependencies=[Depends(owner)])
 async def sync_catalog_topics():
+    # Bot API does not expose a list of forum topics. Return observed topics;
+    # never mark unseen topics closed or use supplier-account sessions here.
     async with destination_lock:
         with Sessions() as db:
-            destination = current_forum(db)
-            chat_id = destination.chat_id
-        clients = [(slot, client) for slot, client in worker_clients.items() if client and client.is_connected()]
-        if not clients:
-            raise HTTPException(409, 'Нет подключённого работающего аккаунта. Проверьте статус аккаунта в разделе «Поставщики».')
-        result = None
-        errors = []
-        for slot, client in clients:
-            try:
-                async def fetch():
-                    try:
-                        peer = await client.get_input_entity(chat_id)
-                    except ValueError:
-                        await client.get_dialogs()
-                        peer = await client.get_input_entity(chat_id)
-                    return await client(functions.messages.GetForumTopicsRequest(peer=peer, offset_date=None, offset_id=0, offset_topic=0, limit=100))
-                result = await asyncio.wait_for(fetch(), timeout=25)
-                break
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                kind = type(exc).__name__
-                log.info('Could not read forum topics with reader slot %s (%s)', slot, kind)
-                if isinstance(exc, ValueError) or kind in ('ChannelPrivateError', 'ChannelInvalidError', 'ChatIdInvalidError'):
-                    detail = 'не видит привязанный чат; возможно, аккаунт не состоит в нём'
-                elif isinstance(exc, asyncio.TimeoutError):
-                    detail = 'Telegram не ответил вовремя'
-                elif kind in ('AuthKeyDuplicatedError', 'AuthKeyUnregisteredError', 'SessionRevokedError'):
-                    detail = 'сессия Telegram недействительна'
-                elif kind in ('ChatAdminRequiredError', 'UserBannedInChannelError'):
-                    detail = 'Telegram не дал доступ к темам'
-                elif kind == 'ChannelForumMissingError':
-                    detail = 'Telegram сообщает, что темы в чате не включены'
-                elif isinstance(exc, (OSError, ConnectionError)):
-                    detail = 'ошибка соединения с Telegram'
-                else:
-                    detail = 'не удалось выполнить запрос к Telegram'
-                safe_kind = kind if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,79}', kind) else 'Error'
-                errors.append(f'Аккаунт {slot}: {detail} ({safe_kind})')
-        if result is None:
-            raise HTTPException(422, '; '.join(errors) + '. Можно проверить участие аккаунта кнопкой ниже.')
-        count = 0
-        with Sessions() as db:
-            destination = current_forum(db)
-            if destination.chat_id != chat_id:
-                raise HTTPException(409, 'Привязанный чат изменился. Повторите загрузку.')
-            seen_ids = set()
-            for topic in result.topics:
-                title, tid = getattr(topic, 'title', None), getattr(topic, 'id', None)
-                if title and isinstance(tid, int) and tid > 0:
-                    save_topic(db, chat_id, tid, title, bool(getattr(topic, 'closed', False)))
-                    seen_ids.add(tid)
-                    count += 1
-            if result.count <= len(result.topics):
-                # A complete refresh can invalidate cached topics that no longer exist.
-                for old in db.scalars(select(CatalogTopic).where(CatalogTopic.chat_id == chat_id)).all():
-                    if old.thread_id not in seen_ids:
-                        old.closed = True
-            db.commit()
-            data = topic_data(db, destination)
-        data['loaded_count'] = count
-        data['total_count'] = result.count
-        data['incomplete'] = result.count > len(result.topics)
-        return data
+            data = topic_data(db, current_forum(db))
+            data['loaded_count'] = len(data['topics'])
+            data['incomplete'] = True
+            return data
 
 
 @router.post('/destination/topics/join/{slot}', dependencies=[Depends(owner)])
 async def join_catalog_group(slot: int):
-    """Owner-initiated join of an existing reader, never a second Telegram session."""
-    from telethon.errors import UserAlreadyParticipantError
     validate_slot(slot)
-    token = os.getenv('TG_BOT_TOKEN')
-    if not token:
-        raise HTTPException(503, 'Токен бота не настроен')
+    raise HTTPException(410, 'Личные аккаунты для тем больше не используются.')
+
+
+async def observe_catalog_topic(message):
+    """Observe Bot API forum events without replying or fetching user sessions."""
+    chat = getattr(message, 'chat', None)
+    if not chat or getattr(chat, 'type', None) != 'supergroup' or not getattr(chat, 'is_forum', False):
+        return
+    created = getattr(message, 'forum_topic_created', None)
+    edited = getattr(message, 'forum_topic_edited', None)
+    closed_event = getattr(message, 'forum_topic_closed', None)
+    reopened = getattr(message, 'forum_topic_reopened', None)
+    general_hidden = getattr(message, 'general_forum_topic_hidden', None)
+    general_unhidden = getattr(message, 'general_forum_topic_unhidden', None)
+    thread_id = getattr(message, 'message_thread_id', None)
+    if not thread_id and created:
+        thread_id = getattr(message, 'message_id', None)
+    if not thread_id and (general_hidden or general_unhidden):
+        thread_id = 1
+    if type(thread_id) is not int or thread_id <= 0:
+        return
+    title = getattr(created or edited, 'name', None)
+    if not isinstance(title, str) or not title.strip():
+        title = None
+    # Hiding General changes its visibility, not whether it is closed.
+    state = True if closed_event else False if created or reopened else None
     async with destination_lock:
-        async with locks[slot]:
-            with Sessions() as db:
-                destination = current_forum(db)
-                reader = db.get(ReaderAccount, slot)
-                if not reader:
-                    raise HTTPException(404, 'Аккаунт не подключён')
-                chat_id, user_id = destination.chat_id, int(reader.telegram_id)
-            client = worker_clients.get(slot)
-            if not client or not client.is_connected():
-                raise HTTPException(409, 'Аккаунт не работает. Проверьте его статус в разделе «Поставщики».')
-            bot = Bot(token=token)
-            invite_link = None
-            try:
-                checked = await asyncio.wait_for(verify_destination(bot, chat_id), timeout=15)
-                if not checked['is_forum']:
-                    raise HTTPException(422, 'В привязанном чате не включены темы')
-                member = await asyncio.wait_for(bot.get_chat_member(chat_id, user_id), timeout=15)
-                status = member.status
-                if status in ('creator', 'administrator', 'member') or (status == 'restricted' and getattr(member, 'is_member', False)):
-                    return {'ok': True, 'already_member': True}
-                if status == 'kicked':
-                    raise HTTPException(422, 'Аккаунт заблокирован в этом чате. Снимите блокировку в Telegram.')
-                try:
-                    invite = await asyncio.wait_for(bot.create_chat_invite_link(
-                        chat_id=chat_id, name='VOLT topics temporary',
-                        expire_date=int(time.time()) + 120, member_limit=1), timeout=15)
-                    invite_link = invite.invite_link
-                except (TelegramAPIError, asyncio.TimeoutError):
-                    raise HTTPException(422, 'Бот не смог создать приглашение. Проверьте его право «Приглашение пользователей».') from None
-                parsed = urlparse(invite_link)
-                path = parsed.path.strip('/')
-                invite_hash = path[1:] if path.startswith('+') else path.removeprefix('joinchat/')
-                if parsed.hostname not in ('t.me', 'telegram.me') or not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', invite_hash):
-                    raise HTTPException(502, 'Telegram вернул некорректное приглашение')
-                try:
-                    await asyncio.wait_for(client(functions.messages.ImportChatInviteRequest(hash=invite_hash)), timeout=25)
-                except UserAlreadyParticipantError:
-                    return {'ok': True, 'already_member': True}
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    log.info('Could not join catalog forum for reader slot %s (%s)', slot, type(exc).__name__)
-                    raise HTTPException(422, 'Telegram не подтвердил вступление. Проверьте участники чата и повторите.') from None
-                return {'ok': True, 'already_member': False}
-            except (TelegramAPIError, asyncio.TimeoutError):
-                raise HTTPException(422, 'Не удалось проверить доступ бота и аккаунта к чату.') from None
-            finally:
-                if invite_link:
-                    try:
-                        await asyncio.wait_for(bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=invite_link), timeout=10)
-                    except Exception as exc:
-                        log.warning('Could not revoke short-lived topic invite (%s)', type(exc).__name__)
-                await bot.session.close()
+        with Sessions() as db:
+            destination = db.get(CatalogDestination, 1)
+            if not destination or not destination.is_forum or destination.chat_id != chat.id:
+                return
+            topic = db.scalar(select(CatalogTopic).where(CatalogTopic.chat_id == chat.id,
+                                                         CatalogTopic.thread_id == thread_id))
+            if topic is None:
+                topic = CatalogTopic(chat_id=chat.id, thread_id=thread_id,
+                                     title=(title or f'Тема {thread_id}')[:255], closed=state,
+                                     checked_at=datetime.now(timezone.utc))
+                db.add(topic)
+            else:
+                if title:
+                    topic.title = title[:255]
+                if state is not None:
+                    topic.closed = state
+                topic.checked_at = datetime.now(timezone.utc)
+            db.commit()
 
 
 class TopicRuleIn(BaseModel):
@@ -584,7 +512,9 @@ async def register_catalog_topic(chat_id, thread_id, title, bot):
             destination = current_forum(db)
             if destination.chat_id != chat_id:
                 raise HTTPException(409, 'Привязанный чат изменился')
-            save_topic(db, chat_id, thread_id, title, None)
+            existing = db.scalar(select(CatalogTopic).where(CatalogTopic.chat_id == chat_id,
+                                                            CatalogTopic.thread_id == thread_id))
+            save_topic(db, chat_id, thread_id, title, existing.closed if existing else None)
             db.commit()
 
 

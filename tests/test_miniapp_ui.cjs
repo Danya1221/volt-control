@@ -87,23 +87,28 @@ const firstTest=(async()=>{await new Promise(r=>setImmediate(r));assert.equal(el
   await sourceForm.children.find(x=>x.textContent==='Подтвердить цену на сегодня').onclick();
   const priceReq=requests[requests.length-1];assert.equal(priceReq.key,'/accounts/1/messages/10/import-line');assert.equal(priceReq.body.line,1);assert.equal(priceReq.body.confirmed_today,true);
   console.log('Incoming product and price review passed');
-  context.fetch=async(url,opts={})=>{const key=url.replace('/miniapp/api','');if(key==='/destination/topics/sync')return {ok:false,json:async()=>({detail:'Проверьте доступ аккаунта к группе'})};return {ok:true,json:async()=>data[key]}};
+  let failTopics=false;const topicCalls=[];
+  context.fetch=async(url,opts={})=>{const key=url.replace('/miniapp/api','');topicCalls.push({key,method:opts.method||'GET'});if(key==='/destination/topics'&&failTopics)return {ok:false,json:async()=>({detail:'Не удалось получить список'})};return {ok:true,json:async()=>data[key]}};
   await vm.runInContext('loadTopics(destinationForTest)',context);
-  const syncButton=elements.topicSettings.children.find(x=>x.textContent==='Загрузить темы из Telegram');await syncButton.onclick();
-  assert.equal(syncButton.disabled,false);assert.match(all(elements.topicSettings),/Проверьте доступ аккаунта к группе/);
-  console.log('Topic load failure shown beside button passed');
+  assert.match(all(elements.topicSettings),/\/volttopic Название/);
+  assert.doesNotMatch(all(elements.topicSettings),/Добавить аккаунт в чат|отслеживать поставщиков/);
+  failTopics=true;const refreshButton=elements.topicSettings.children.find(x=>x.textContent==='Обновить список тем');await refreshButton.onclick();
+  assert.equal(refreshButton.disabled,false);assert.match(all(elements.topicSettings),/Не удалось получить список/);
+  console.log('Topic reload failure shown beside button passed');
   data['/accounts']=[{connected:true,slot:1,name:'Ilya'}];
   data['/destination/topics']={topics:[{thread_id:41,title:'Apple',closed:false}],rules:[],publication_enabled:false};
   data['/products']=[];
-  const joinActions=[];
-  context.fetch=async(url,opts={})=>{const key=url.replace('/miniapp/api','');if(opts.method){joinActions.push(key);if(key.endsWith('/join/1'))return {ok:true,json:async()=>({ok:true,already_member:false})};if(key.endsWith('/topics/sync'))return {ok:true,json:async()=>({loaded_count:1,incomplete:false})}}return {ok:true,json:async()=>data[key]}};
+  failTopics=false;topicCalls.length=0;
   context.destinationForTest={connected:true,is_forum:true,title:'Quantumm'};
   await vm.runInContext('loadTopics(destinationForTest)',context);
-  let joinForm=elements.topicSettings.children.find(x=>x.className==='form-stack'&&all(x).includes('Добавить аккаунт в чат'));
-  assert(joinForm);context.confirm=()=>false;await joinForm.children.find(x=>x.textContent==='Добавить аккаунт в чат').onclick();assert.deepEqual(joinActions,[]);
-  context.confirm=()=>true;await joinForm.children.find(x=>x.textContent==='Добавить аккаунт в чат').onclick();
-  assert.deepEqual(joinActions,['/destination/topics/join/1','/destination/topics/sync']);assert.match(all(elements.topicSettings),/Тем загружено: 1/);
-  console.log('Explicit topic account join and reload passed');
+  data['/destination/topics'].topics.push({thread_id:42,title:'Samsung',closed:false});
+  await elements.topicSettings.children.find(x=>x.textContent==='Обновить список тем').onclick();
+  assert.match(all(elements.topicSettings),/Список обновлён/);
+  const routeForm=elements.topicSettings.children.find(x=>x.className==='form-stack');
+  assert(routeForm.children.filter(x=>x.tag==='select')[3].children.some(x=>x.textContent==='Samsung'));
+  assert(topicCalls.filter(x=>x.key==='/destination/topics').every(x=>x.method==='GET'));
+  assert(!topicCalls.some(x=>x.key==='/accounts'||x.key.includes('/join/')||x.key.includes('/sync')));
+  console.log('Bot topic list refresh uses saved topics without account or sync passed');
 
 
 

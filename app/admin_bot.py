@@ -2,6 +2,7 @@
 import os
 import secrets
 import time
+import logging
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -13,6 +14,7 @@ from fastapi import HTTPException
 CHAT_REQUEST_ID = 72103
 # One short-lived candidate per owner, never the message contents.
 forward_candidates = {}
+log = logging.getLogger(__name__)
 
 
 def is_owner(message, owner_id):
@@ -126,27 +128,33 @@ async def register_topic_command(message, owner_id):
     if not is_owner(message, owner_id):
         return
     if message.chat.type != 'supergroup' or not getattr(message.chat, 'is_forum', False):
-        await message.answer('Открой нужную тему привязанной группы и отправь команду там.')
         return
     if os.getenv('VOLT_MINIAPP_ENABLED') != '1':
-        await message.answer('Сначала включи Mini App.')
         return
     thread_id = getattr(message, 'message_thread_id', None) or 1
     name = (message.text or '').partition(' ')[2].strip()[:255]
     if not name:
-        await message.answer('Напиши название после команды, например: /volttopic Наушники')
         return
     from app.miniapp import register_catalog_topic
     try:
         await register_catalog_topic(message.chat.id, thread_id, name, message.bot)
-    except HTTPException as exc:
-        await message.answer(str(exc.detail))
+    except HTTPException:
         return
-    await message.answer('Тема «' + name + '» добавлена в настройки VOLT. Выбери её для категории или бренда в Mini App.')
 
 
 def create_dispatcher(owner_id):
     dp = Dispatcher()
+
+    async def observe_topics(handler, event, data):
+        if os.getenv('VOLT_MINIAPP_ENABLED') == '1':
+            try:
+                from app.miniapp import observe_catalog_topic
+                await observe_catalog_topic(event)
+            except Exception:
+                log.exception('Could not observe catalog topic')
+        return await handler(event, data)
+
+    dp.message.outer_middleware(observe_topics)
 
     @dp.message(F.forward_origin)
     async def forwarded_message(message: Message):

@@ -212,19 +212,11 @@ async function loadTopics(destination){
  const box=document.getElementById('topicSettings');box.replaceChildren();
  if(!destination.connected){box.append(el('p','Сначала привяжи чат каталога.','muted'));return}
  if(!destination.is_forum){box.append(el('p','Включи темы в привязанном чате Telegram и заново проверь привязку.','muted'));return}
- box.append(el('p','Загрузи темы и выбери, куда отправлять отдельный товар, бренд, категорию или их сочетание. Правила сохраняются для этого чата.','muted'));
- const topicStatus=el('p','','muted');
- box.append(btn('Загрузить темы из Telegram',async()=>{topicStatus.className='muted';topicStatus.textContent='Загружаем темы…';try{const r=await api('/destination/topics/sync',{method:'POST'});await loadTopics(destination);const status=box.querySelector('.topic-load-status');if(status){status.className='topic-load-status '+(r.incomplete?'error':'status');status.textContent=r.incomplete?'Загружена только часть тем.':'Тем загружено: '+r.loaded_count}}catch(e){topicStatus.className='topic-load-status error';topicStatus.textContent=e.message}},'secondary'));topicStatus.className='topic-load-status muted';box.append(topicStatus);
- box.append(el('p','Чтобы выбрать темы здесь, подключённый аккаунт Telegram должен состоять в привязанном чате и отслеживать поставщиков. Права администратора бота проверяются отдельно.','muted'));
- const accounts=(await api('/accounts')).filter(a=>a.connected&&(a.slot===1||a.slot===2));
- if(accounts.length){
-  const joinForm=el('div',undefined,'form-stack'), accountSelect=el('select');
-  for(const a of accounts){const option=el('option','Аккаунт '+a.slot+': '+a.name);option.value=String(a.slot);accountSelect.append(option)}
-  accountSelect.value=String(accounts[0].slot);
-  joinForm.append(el('p','Если аккаунт ещё не в этом чате, выбери его и добавь. Сообщения в чат не отправляются.','muted'),accountSelect,
-   btn('Добавить аккаунт в чат',async()=>{const a=accounts.find(x=>String(x.slot)===accountSelect.value);if(!a)throw Error('Выберите аккаунт');if(!confirm('Аккаунт «'+a.name+'» вступит в чат «'+destination.title+'», если ещё не состоит в нём. Продолжить?'))return;topicStatus.className='topic-load-status muted';topicStatus.textContent='Проверяем доступ аккаунта к чату…';let joined=false;try{const r=await api('/destination/topics/join/'+a.slot,{method:'POST'});joined=true;topicStatus.textContent=r.already_member?'Аккаунт уже в чате. Загружаем темы…':'Аккаунт добавлен. Загружаем темы…';const topics=await api('/destination/topics/sync',{method:'POST'});await loadTopics(destination);const status=box.querySelector('.topic-load-status');if(status){status.className='topic-load-status '+(topics.incomplete?'error':'status');status.textContent=topics.incomplete?'Загружена только часть тем.':'Тем загружено: '+topics.loaded_count}}catch(e){topicStatus.className='topic-load-status error';topicStatus.textContent=(joined?'Доступ к чату подтверждён, но темы не загрузились. ':'')+e.message}},'secondary'));
-  box.append(joinForm)
- }
+ box.append(el('p','Выбери, куда отправлять товар, бренд или категорию. Правила сохраняются для этого чата.','muted'));
+ box.append(el('p','Новые темы появляются здесь, когда бот получает сообщение об их создании. Telegram не отдаёт боту список старых тем.','muted'));
+ box.append(el('p','Чтобы добавить существующую тему: открой её в привязанном чате и от аккаунта владельца отправь /volttopic Название. Например: /volttopic Apple. Повтори для каждой темы, затем обнови список.','muted'));
+ box.append(btn('Обновить список тем',async()=>{try{await loadTopics(destination);const status=box.querySelector('.topic-load-status');if(status)status.textContent='Список обновлён.'}catch(e){const status=box.querySelector('.topic-load-status');if(status){status.className='topic-load-status error';status.textContent=e.message}}},'secondary'));
+ const topicStatus=el('p','','topic-load-status muted');box.append(topicStatus);
 
  const data=await api('/destination/topics');
  if(!data.topics.length){box.append(el('p','Темы пока не добавлены.','muted'));return}

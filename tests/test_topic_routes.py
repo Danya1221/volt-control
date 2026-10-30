@@ -79,11 +79,11 @@ def test_topic_command_checks_owner_chat_and_rights(monkeypatch):
         other.answer.assert_not_awaited()
         wrong=msg(123,-10098)
         await admin_bot.register_topic_command(wrong,123)
-        assert 'не привязанный' in wrong.answer.await_args.args[0]
+        wrong.answer.assert_not_awaited()
         checked.assert_not_awaited()
         good=msg(123,-10099)
         await admin_bot.register_topic_command(good,123)
-        assert 'добавлена' in good.answer.await_args.args[0]
+        good.answer.assert_not_awaited()
         checked.assert_awaited_once()
     asyncio.run(scenario())
     with db() as session:
@@ -92,121 +92,84 @@ def test_topic_command_checks_owner_chat_and_rights(monkeypatch):
     engine.dispose()
 
 
-def test_sync_uses_existing_reader_session_and_never_creates_new_client(monkeypatch):
+def test_sync_returns_observed_topics_without_user_account(monkeypatch):
     engine, db = setup_db(monkeypatch)
-    class Reader:
-        def is_connected(self): return True
-        async def get_dialogs(self): pass
-        async def get_input_entity(self, chat_id):
-            assert chat_id == -10099
-            return 'forum-peer'
-        async def __call__(self, req):
-            assert req.peer == 'forum-peer'
-            return SimpleNamespace(count=1, topics=[SimpleNamespace(id=77,title='Смартфоны',closed=False)])
-    miniapp.worker_clients[1] = Reader()
+    class ForbiddenReader:
+        def is_connected(self):
+            raise AssertionError('reader session must not be used')
+    miniapp.worker_clients[1] = ForbiddenReader()
     try:
-        result=asyncio.run(miniapp.sync_catalog_topics())
-        assert result['loaded_count'] == 1 and not result['incomplete']
-        assert any(t['thread_id']==77 and t['title']=='Смартфоны' for t in result['topics'])
-    finally:
-        miniapp.worker_clients.clear()
-        engine.dispose()
-
-
-def test_owner_can_join_reader_without_exposing_invite(monkeypatch):
-    from telethon.tl.functions.messages import ImportChatInviteRequest
-    engine, db = setup_db(monkeypatch)
-    with db() as session:
-        session.add(miniapp.ReaderAccount(slot=1, telegram_id='678', display_name='Reader', encrypted_session='x', chats_json='[]'))
-        session.commit()
-    calls = []
-    bots = []
-    class Reader:
-        def is_connected(self): return True
-        async def __call__(self, req):
-            assert isinstance(req, ImportChatInviteRequest)
-            calls.append('join')
-    class BotStub:
-        def __init__(self, token):
-            self.session = SimpleNamespace(close=AsyncMock())
-            self.get_chat_member = AsyncMock(return_value=SimpleNamespace(status='left'))
-            self.create_chat_invite_link = AsyncMock(return_value=SimpleNamespace(invite_link='https://t.me/+SafeLocalInvite123'))
-            self.revoke_chat_invite_link = AsyncMock()
-            bots.append(self)
-    miniapp.worker_clients[1] = Reader()
-    monkeypatch.setattr(miniapp, 'Bot', BotStub)
-    check = AsyncMock(return_value={'is_forum': True})
-    monkeypatch.setattr(miniapp, 'verify_destination', check)
-    client = TestClient(app)
-    headers = {'X-Telegram-Init-Data': signed()}
-    try:
-        assert client.post('/miniapp/api/destination/topics/join/1').status_code == 401
-        assert not bots and not calls
-        response = client.post('/miniapp/api/destination/topics/join/1', headers=headers)
-        assert response.status_code == 200 and response.json() == {'ok': True, 'already_member': False}
-        assert 'SafeLocalInvite123' not in response.text
-        assert calls == ['join']
-        bots[0].create_chat_invite_link.assert_awaited_once()
-        assert bots[0].create_chat_invite_link.await_args.kwargs['member_limit'] == 1
-        bots[0].revoke_chat_invite_link.assert_awaited_once()
-        bots[0].session.close.assert_awaited_once()
-        check.assert_awaited_once()
-    finally:
-        miniapp.worker_clients.clear()
-        engine.dispose()
-
-
-def test_already_joined_and_invite_permission_failure(monkeypatch):
-    from aiogram.exceptions import TelegramBadRequest
-    from aiogram.methods import GetMe
-    engine, db = setup_db(monkeypatch)
-    with db() as session:
-        session.add(miniapp.ReaderAccount(slot=1, telegram_id='678', display_name='Reader', encrypted_session='x', chats_json='[]'))
-        session.commit()
-    class Reader:
-        def is_connected(self): return True
-        async def __call__(self, req): raise AssertionError('must not join')
-    miniapp.worker_clients[1] = Reader()
-    bots = []
-    class BotStub:
-        status = 'member'
-        def __init__(self, token):
-            self.session = SimpleNamespace(close=AsyncMock())
-            self.get_chat_member = AsyncMock(return_value=SimpleNamespace(status=BotStub.status))
-            self.create_chat_invite_link = AsyncMock(side_effect=TelegramBadRequest(method=GetMe(), message='not allowed'))
-            self.revoke_chat_invite_link = AsyncMock()
-            bots.append(self)
-    monkeypatch.setattr(miniapp, 'Bot', BotStub)
-    monkeypatch.setattr(miniapp, 'verify_destination', AsyncMock(return_value={'is_forum': True}))
-    client = TestClient(app)
-    headers = {'X-Telegram-Init-Data': signed()}
-    try:
-        result = client.post('/miniapp/api/destination/topics/join/1', headers=headers)
-        assert result.json() == {'ok': True, 'already_member': True}
-        bots[-1].create_chat_invite_link.assert_not_awaited()
-        BotStub.status = 'left'
-        result = client.post('/miniapp/api/destination/topics/join/1', headers=headers)
-        assert result.status_code == 422 and 'Приглашение пользователей' in result.json()['detail']
-        bots[-1].session.close.assert_awaited_once()
-    finally:
-        miniapp.worker_clients.clear()
-        engine.dispose()
-
-
-def test_topic_sync_explains_safe_error_without_exception_details(monkeypatch):
-    engine, db = setup_db(monkeypatch)
-    class Reader:
-        def is_connected(self): return True
-        async def get_input_entity(self, chat_id): raise ValueError('sensitive value')
-        async def get_dialogs(self): pass
-    miniapp.worker_clients[1] = Reader()
-    try:
+        result = asyncio.run(miniapp.sync_catalog_topics())
+        assert result['loaded_count'] == 3 and result['incomplete']
+        assert {x['title'] for x in result['topics']} == {'Общее', 'Apple', 'iPhone'}
         client = TestClient(app)
-        headers = {'X-Telegram-Init-Data': signed()}
-        result = client.post('/miniapp/api/destination/topics/sync', headers=headers)
-        assert result.status_code == 422
-        assert 'Аккаунт 1' in result.json()['detail'] and 'ValueError' in result.json()['detail']
-        assert 'sensitive' not in result.text
+        assert client.post('/miniapp/api/destination/topics/join/1').status_code == 401
+        assert client.post('/miniapp/api/destination/topics/join/1', headers={'X-Telegram-Init-Data': signed()}).status_code == 410
     finally:
         miniapp.worker_clients.clear()
         engine.dispose()
+
+
+def test_observe_topics_tracks_real_events_and_never_changes_other_groups(monkeypatch):
+    engine, db = setup_db(monkeypatch)
+    def message(**values):
+        defaults = dict(chat=SimpleNamespace(type='supergroup', id=-10099, is_forum=True),
+                        message_id=90, message_thread_id=77)
+        return SimpleNamespace(**(defaults | values))
+    async def run():
+        await miniapp.observe_catalog_topic(message())
+        await miniapp.observe_catalog_topic(message(forum_topic_created=SimpleNamespace(name='Камеры')))
+        await miniapp.observe_catalog_topic(message(forum_topic_edited=SimpleNamespace(name='Аксессуары')))
+        await miniapp.observe_catalog_topic(message(forum_topic_closed=SimpleNamespace()))
+        await miniapp.observe_catalog_topic(message())  # must not reopen or rename
+        await miniapp.observe_catalog_topic(message(chat=SimpleNamespace(type='supergroup', id=-10098, is_forum=True),
+                                                    forum_topic_edited=SimpleNamespace(name='Чужая')))
+    asyncio.run(run())
+    with db() as session:
+        topic = session.scalar(select(miniapp.CatalogTopic).where(miniapp.CatalogTopic.thread_id == 77))
+        assert (topic.chat_id, topic.title, topic.closed) == (-10099, 'Аксессуары', True)
+    asyncio.run(miniapp.observe_catalog_topic(message(forum_topic_reopened=SimpleNamespace())))
+    with db() as session:
+        topic = session.scalar(select(miniapp.CatalogTopic).where(miniapp.CatalogTopic.thread_id == 77))
+        assert (topic.title, topic.closed) == ('Аксессуары', False)
+    engine.dispose()
+
+
+def test_observe_unknown_and_general_events_keep_status_unknown(monkeypatch):
+    engine, db = setup_db(monkeypatch)
+    chat = SimpleNamespace(type='supergroup', id=-10099, is_forum=True)
+    asyncio.run(miniapp.observe_catalog_topic(SimpleNamespace(chat=chat, message_thread_id=78)))
+    asyncio.run(miniapp.observe_catalog_topic(SimpleNamespace(chat=chat, message_thread_id=None, general_forum_topic_hidden=SimpleNamespace())))
+    with db() as session:
+        topics = {t.thread_id: t for t in session.scalars(select(miniapp.CatalogTopic)).all()}
+        assert (topics[78].title, topics[78].closed) == ('Тема 78', None)
+        assert (topics[1].title, topics[1].closed) == ('Тема 1', None)
+    engine.dispose()
+
+
+def test_topic_middleware_observes_before_other_handlers_and_never_sends(monkeypatch):
+    setup_db(monkeypatch)
+    observed = AsyncMock()
+    handler = AsyncMock(return_value='handled')
+    monkeypatch.setattr(miniapp, 'observe_catalog_topic', observed)
+    dispatcher = admin_bot.create_dispatcher(123)
+    event = SimpleNamespace(forward_origin=object(), text='/start')
+    middleware = list(dispatcher.message.outer_middleware)[-1]
+    result = asyncio.run(middleware(handler, event, {}))
+    assert result == 'handled'
+    observed.assert_awaited_once_with(event)
+    handler.assert_awaited_once_with(event, {})
+
+
+def test_manual_name_preserves_existing_closed_state(monkeypatch):
+    engine, db = setup_db(monkeypatch)
+    monkeypatch.setattr(miniapp, 'verify_destination', AsyncMock(return_value={'is_forum':True}))
+    with db() as session:
+        topic = session.scalar(select(miniapp.CatalogTopic).where(miniapp.CatalogTopic.thread_id == 10))
+        topic.closed = True
+        session.commit()
+    asyncio.run(miniapp.register_catalog_topic(-10099, 10, 'Новое имя', object()))
+    with db() as session:
+        topic = session.scalar(select(miniapp.CatalogTopic).where(miniapp.CatalogTopic.thread_id == 10))
+        assert (topic.title, topic.closed) == ('Новое имя', True)
+    engine.dispose()
