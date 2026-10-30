@@ -11,7 +11,8 @@ import time
 from contextlib import suppress
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, urlparse
+import re
 from zoneinfo import ZoneInfo
 
 import qrcode
@@ -391,11 +392,12 @@ async def sync_catalog_topics():
         with Sessions() as db:
             destination = current_forum(db)
             chat_id = destination.chat_id
-        clients = [c for c in worker_clients.values() if c and c.is_connected()]
+        clients = [(slot, client) for slot, client in worker_clients.items() if client and client.is_connected()]
         if not clients:
             raise HTTPException(409, 'Нет подключённого работающего аккаунта. Проверьте статус аккаунта в разделе «Поставщики».')
         result = None
-        for client in clients:
+        errors = []
+        for slot, client in clients:
             try:
                 async def fetch():
                     try:
@@ -409,9 +411,26 @@ async def sync_catalog_topics():
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.info('Could not read forum topics with reader (%s)', type(exc).__name__)
+                kind = type(exc).__name__
+                log.info('Could not read forum topics with reader slot %s (%s)', slot, kind)
+                if isinstance(exc, ValueError) or kind in ('ChannelPrivateError', 'ChannelInvalidError', 'ChatIdInvalidError'):
+                    detail = 'не видит привязанный чат; возможно, аккаунт не состоит в нём'
+                elif isinstance(exc, asyncio.TimeoutError):
+                    detail = 'Telegram не ответил вовремя'
+                elif kind in ('AuthKeyDuplicatedError', 'AuthKeyUnregisteredError', 'SessionRevokedError'):
+                    detail = 'сессия Telegram недействительна'
+                elif kind in ('ChatAdminRequiredError', 'UserBannedInChannelError'):
+                    detail = 'Telegram не дал доступ к темам'
+                elif kind == 'ChannelForumMissingError':
+                    detail = 'Telegram сообщает, что темы в чате не включены'
+                elif isinstance(exc, (OSError, ConnectionError)):
+                    detail = 'ошибка соединения с Telegram'
+                else:
+                    detail = 'не удалось выполнить запрос к Telegram'
+                safe_kind = kind if re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,79}', kind) else 'Error'
+                errors.append(f'Аккаунт {slot}: {detail} ({safe_kind})')
         if result is None:
-            raise HTTPException(422, 'Не удалось загрузить темы. Проверьте, что подключённый аккаунт Telegram состоит в привязанной группе, и повторите.')
+            raise HTTPException(422, '; '.join(errors) + '. Можно проверить участие аккаунта кнопкой ниже.')
         count = 0
         with Sessions() as db:
             destination = current_forum(db)
@@ -435,6 +454,70 @@ async def sync_catalog_topics():
         data['total_count'] = result.count
         data['incomplete'] = result.count > len(result.topics)
         return data
+
+
+@router.post('/destination/topics/join/{slot}', dependencies=[Depends(owner)])
+async def join_catalog_group(slot: int):
+    """Owner-initiated join of an existing reader, never a second Telegram session."""
+    from telethon.errors import UserAlreadyParticipantError
+    validate_slot(slot)
+    token = os.getenv('TG_BOT_TOKEN')
+    if not token:
+        raise HTTPException(503, 'Токен бота не настроен')
+    async with destination_lock:
+        async with locks[slot]:
+            with Sessions() as db:
+                destination = current_forum(db)
+                reader = db.get(ReaderAccount, slot)
+                if not reader:
+                    raise HTTPException(404, 'Аккаунт не подключён')
+                chat_id, user_id = destination.chat_id, int(reader.telegram_id)
+            client = worker_clients.get(slot)
+            if not client or not client.is_connected():
+                raise HTTPException(409, 'Аккаунт не работает. Проверьте его статус в разделе «Поставщики».')
+            bot = Bot(token=token)
+            invite_link = None
+            try:
+                checked = await asyncio.wait_for(verify_destination(bot, chat_id), timeout=15)
+                if not checked['is_forum']:
+                    raise HTTPException(422, 'В привязанном чате не включены темы')
+                member = await asyncio.wait_for(bot.get_chat_member(chat_id, user_id), timeout=15)
+                status = member.status
+                if status in ('creator', 'administrator', 'member') or (status == 'restricted' and getattr(member, 'is_member', False)):
+                    return {'ok': True, 'already_member': True}
+                if status == 'kicked':
+                    raise HTTPException(422, 'Аккаунт заблокирован в этом чате. Снимите блокировку в Telegram.')
+                try:
+                    invite = await asyncio.wait_for(bot.create_chat_invite_link(
+                        chat_id=chat_id, name='VOLT topics temporary',
+                        expire_date=int(time.time()) + 120, member_limit=1), timeout=15)
+                    invite_link = invite.invite_link
+                except (TelegramAPIError, asyncio.TimeoutError):
+                    raise HTTPException(422, 'Бот не смог создать приглашение. Проверьте его право «Приглашение пользователей».') from None
+                parsed = urlparse(invite_link)
+                path = parsed.path.strip('/')
+                invite_hash = path[1:] if path.startswith('+') else path.removeprefix('joinchat/')
+                if parsed.hostname not in ('t.me', 'telegram.me') or not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', invite_hash):
+                    raise HTTPException(502, 'Telegram вернул некорректное приглашение')
+                try:
+                    await asyncio.wait_for(client(functions.messages.ImportChatInviteRequest(hash=invite_hash)), timeout=25)
+                except UserAlreadyParticipantError:
+                    return {'ok': True, 'already_member': True}
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.info('Could not join catalog forum for reader slot %s (%s)', slot, type(exc).__name__)
+                    raise HTTPException(422, 'Telegram не подтвердил вступление. Проверьте участники чата и повторите.') from None
+                return {'ok': True, 'already_member': False}
+            except (TelegramAPIError, asyncio.TimeoutError):
+                raise HTTPException(422, 'Не удалось проверить доступ бота и аккаунта к чату.') from None
+            finally:
+                if invite_link:
+                    try:
+                        await asyncio.wait_for(bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=invite_link), timeout=10)
+                    except Exception as exc:
+                        log.warning('Could not revoke short-lived topic invite (%s)', type(exc).__name__)
+                await bot.session.close()
 
 
 class TopicRuleIn(BaseModel):
