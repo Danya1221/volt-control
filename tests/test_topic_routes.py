@@ -111,3 +111,102 @@ def test_sync_uses_existing_reader_session_and_never_creates_new_client(monkeypa
     finally:
         miniapp.worker_clients.clear()
         engine.dispose()
+
+
+def test_owner_can_join_reader_without_exposing_invite(monkeypatch):
+    from telethon.tl.functions.messages import ImportChatInviteRequest
+    engine, db = setup_db(monkeypatch)
+    with db() as session:
+        session.add(miniapp.ReaderAccount(slot=1, telegram_id='678', display_name='Reader', encrypted_session='x', chats_json='[]'))
+        session.commit()
+    calls = []
+    bots = []
+    class Reader:
+        def is_connected(self): return True
+        async def __call__(self, req):
+            assert isinstance(req, ImportChatInviteRequest)
+            calls.append('join')
+    class BotStub:
+        def __init__(self, token):
+            self.session = SimpleNamespace(close=AsyncMock())
+            self.get_chat_member = AsyncMock(return_value=SimpleNamespace(status='left'))
+            self.create_chat_invite_link = AsyncMock(return_value=SimpleNamespace(invite_link='https://t.me/+SafeLocalInvite123'))
+            self.revoke_chat_invite_link = AsyncMock()
+            bots.append(self)
+    miniapp.worker_clients[1] = Reader()
+    monkeypatch.setattr(miniapp, 'Bot', BotStub)
+    check = AsyncMock(return_value={'is_forum': True})
+    monkeypatch.setattr(miniapp, 'verify_destination', check)
+    client = TestClient(app)
+    headers = {'X-Telegram-Init-Data': signed()}
+    try:
+        assert client.post('/miniapp/api/destination/topics/join/1').status_code == 401
+        assert not bots and not calls
+        response = client.post('/miniapp/api/destination/topics/join/1', headers=headers)
+        assert response.status_code == 200 and response.json() == {'ok': True, 'already_member': False}
+        assert 'SafeLocalInvite123' not in response.text
+        assert calls == ['join']
+        bots[0].create_chat_invite_link.assert_awaited_once()
+        assert bots[0].create_chat_invite_link.await_args.kwargs['member_limit'] == 1
+        bots[0].revoke_chat_invite_link.assert_awaited_once()
+        bots[0].session.close.assert_awaited_once()
+        check.assert_awaited_once()
+    finally:
+        miniapp.worker_clients.clear()
+        engine.dispose()
+
+
+def test_already_joined_and_invite_permission_failure(monkeypatch):
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import GetMe
+    engine, db = setup_db(monkeypatch)
+    with db() as session:
+        session.add(miniapp.ReaderAccount(slot=1, telegram_id='678', display_name='Reader', encrypted_session='x', chats_json='[]'))
+        session.commit()
+    class Reader:
+        def is_connected(self): return True
+        async def __call__(self, req): raise AssertionError('must not join')
+    miniapp.worker_clients[1] = Reader()
+    bots = []
+    class BotStub:
+        status = 'member'
+        def __init__(self, token):
+            self.session = SimpleNamespace(close=AsyncMock())
+            self.get_chat_member = AsyncMock(return_value=SimpleNamespace(status=BotStub.status))
+            self.create_chat_invite_link = AsyncMock(side_effect=TelegramBadRequest(method=GetMe(), message='not allowed'))
+            self.revoke_chat_invite_link = AsyncMock()
+            bots.append(self)
+    monkeypatch.setattr(miniapp, 'Bot', BotStub)
+    monkeypatch.setattr(miniapp, 'verify_destination', AsyncMock(return_value={'is_forum': True}))
+    client = TestClient(app)
+    headers = {'X-Telegram-Init-Data': signed()}
+    try:
+        result = client.post('/miniapp/api/destination/topics/join/1', headers=headers)
+        assert result.json() == {'ok': True, 'already_member': True}
+        bots[-1].create_chat_invite_link.assert_not_awaited()
+        BotStub.status = 'left'
+        result = client.post('/miniapp/api/destination/topics/join/1', headers=headers)
+        assert result.status_code == 422 and 'Приглашение пользователей' in result.json()['detail']
+        bots[-1].session.close.assert_awaited_once()
+    finally:
+        miniapp.worker_clients.clear()
+        engine.dispose()
+
+
+def test_topic_sync_explains_safe_error_without_exception_details(monkeypatch):
+    engine, db = setup_db(monkeypatch)
+    class Reader:
+        def is_connected(self): return True
+        async def get_input_entity(self, chat_id): raise ValueError('sensitive value')
+        async def get_dialogs(self): pass
+    miniapp.worker_clients[1] = Reader()
+    try:
+        client = TestClient(app)
+        headers = {'X-Telegram-Init-Data': signed()}
+        result = client.post('/miniapp/api/destination/topics/sync', headers=headers)
+        assert result.status_code == 422
+        assert 'Аккаунт 1' in result.json()['detail'] and 'ValueError' in result.json()['detail']
+        assert 'sensitive' not in result.text
+    finally:
+        miniapp.worker_clients.clear()
+        engine.dispose()
