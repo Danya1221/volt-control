@@ -5,39 +5,28 @@ Parsing never publishes or applies a supplier batch automatically.
 """
 import re
 from decimal import Decimal
+from app.product_lexicon import recognize_product, normalize_product_name
 
 # Prefer a price after a visible separator; otherwise accept only a terminal integer.
 PRICE_SEPARATED = re.compile(r"\s[-–—:]\s*(?P<price>\d{1,3}(?:[ \u00a0]\d{3})+|\d+)\s*(?:₽|руб\.?|р\.)?\s*$", re.I)
 PRICE_SIMPLE = re.compile(r"(?<![\w])(?P<price>\d{3,})\s*(?:₽|руб\.?|р\.)?\s*$", re.I)
 BULK = re.compile(r"^\s*\(?\s*от\s*\d+\s*(?:шт\.?|штук)\s*\)?", re.I)
-SIM_COMBINED = re.compile(r"(?<!\w)(?:1\s*)?sim\s*[+/]\s*esim(?!\w)", re.I)
+SIM_COMBINED = re.compile(r"(?<!\w)(?:(?:1\s*)?sim\s*[+/]\s*esim|esim\s*[+/]\s*(?:1\s*)?sim)(?!\w)", re.I)
 SIM_TWO = re.compile(r"(?<!\w)(?:2\s*sim|dual\s*sim)(?!\w)", re.I)
 SIM_ESIM = re.compile(r"(?<!\w)esim(?!\w)", re.I)
 
 
 def sim_configuration(name):
-    remaining = name
+    remaining = re.sub(r'\b(?:е\s*сим|есим|е-сим|эсим|еsim)\b', 'esim', name, flags=re.I)
+    remaining = re.sub(r'\bсим\b', 'sim', remaining, flags=re.I)
     hits = set()
     for label, pattern in [('SIM + eSIM', SIM_COMBINED), ('2 SIM', SIM_TWO), ('eSIM', SIM_ESIM)]:
         if pattern.search(remaining):
             hits.add(label)
             remaining = pattern.sub(' ', remaining)
+    if re.search(r'(?<!\w)(?:1\s*sim|single\s*sim)(?!\w)', remaining, re.I):
+        hits.add('1 SIM')
     return hits
-
-BRANDS = {
-    "Apple": re.compile(r"\b(?:iphone|ipad|macbook|apple|airpods)\b", re.I),
-    "Samsung": re.compile(r"\b(?:samsung|galaxy)\b", re.I),
-    "Google": re.compile(r"\b(?:pixel|google)\b", re.I),
-    "Sony": re.compile(r"\b(?:sony|wh-1000)\b", re.I),
-    "Meta Ray-Ban": re.compile(r"\b(?:ray[ -]?ban|meta)\b", re.I),
-    "Insta360": re.compile(r"\binsta360\b", re.I),
-    "DJI": re.compile(r"\bdji\b", re.I),
-    "Nintendo": re.compile(r"\b(?:nintendo|switch)\b", re.I),
-}
-PHONE = re.compile(r"\b(?:iphone|galaxy|pixel|oneplus|honor|nothing)\b", re.I)
-TABLET = re.compile(r"\b(?:ipad|tablet|tab\s+s\d+)\b", re.I)
-LAPTOP = re.compile(r"\b(?:macbook|laptop)\b", re.I)
-
 
 # Restrict this policy to resolved @hi_catalog_bot sources. Unknown entries are reviewed.
 HI_ACCESSORY = re.compile(r"^\s*(?:аксессуар|чехол|стекло|плёнк|пленк|заряд|кабель|adapter|charger|case|cover|cable)", re.I)
@@ -76,10 +65,39 @@ def hi_short_kind(name):
     if HI_MAC_SHORT.search(name): return 'macbook'
     return None
 
+def _clean_line(line):
+    return re.sub(r'^\s*[•▪▫◦·]\s*', '', line.replace('**', '').replace('__', '')).strip()
+
+
+def _price_rows(text):
+    """Pair supplier title/retail-price rows without mixing adjacent products."""
+    lines = text.splitlines()
+    consumed = set()
+    tier = re.compile(r'^[\W_]*от\s+(\d+)\s*(?:шт\.?|штук)\s*[-–—:]\s*(.+)$', re.I)
+    for index, original in enumerate(lines):
+        if index in consumed:
+            continue
+        line = _clean_line(original)
+        nxt = index + 1
+        while nxt < len(lines) and not lines[nxt].strip():
+            nxt += 1
+        if line and nxt < len(lines) and not BULK.match(line):
+            price = tier.match(_clean_line(lines[nxt]))
+            simple = PRICE_SIMPLE.search(line)
+            has_price = PRICE_SEPARATED.search(line) or (simple and simple['price'] not in {'128', '256', '512', '1024', '2048'})
+            if price and price[1] == '1' and not has_price:
+                consumed.add(nxt)
+                yield index + 1, original + '\n' + lines[nxt], line + ' — ' + price[2]
+                continue
+        if tier.match(line):
+            yield index + 1, original, 'От ' + tier.match(line)[1] + ' шт'
+        else:
+            yield index + 1, original, line
+
+
 def parse_lines(text: str, exclude_hi_android: bool = False):
     accepted, review, ignored = [], [], []
-    for number, original in enumerate(text.splitlines(), 1):
-        line = original.strip()
+    for number, original, line in _price_rows(text):
         if not line or line.startswith(("#", "//")):
             continue
         if BULK.match(line):
@@ -94,16 +112,21 @@ def parse_lines(text: str, exclude_hi_android: bool = False):
         if not name or not value.isdecimal() or Decimal(value) <= 0:
             review.append({"line": number, "raw": original, "reason": "Invalid product or price"})
             continue
-        short_kind = hi_short_kind(name) if exclude_hi_android else None
+        normalized = normalize_product_name(name)
+        identity = recognize_product(name)
+        short_kind = hi_short_kind(normalized) if exclude_hi_android else None
         if exclude_hi_android:
-            kind = hi_kind(name)
+            kind = 'other' if identity.family and identity.family != 'phone' else hi_kind(normalized)
             if kind == 'android':
                 ignored.append({"line": number, "raw": original, "reason": "Android-смартфоны этого поставщика исключены"})
                 continue
             if kind == 'uncertain' and not short_kind:
                 review.append({"line": number, "raw": original, "reason": "Нельзя уверенно исключить Android-смартфон"})
                 continue
-        brand = 'Apple' if short_kind else next((key for key, pattern in BRANDS.items() if pattern.search(name)), None)
+        brand = 'Apple' if short_kind else identity.brand
+        if identity.issues:
+            review.append({'line': number, 'raw': original, 'reason': '; '.join(identity.issues)})
+            continue
         if brand is None:
             review.append({"line": number, "raw": original, "reason": "Unknown brand"})
             continue
@@ -112,10 +135,7 @@ def parse_lines(text: str, exclude_hi_android: bool = False):
                                 'ipad': ('iPad', 'Планшеты'), 'macbook': ('MacBook', 'Ноутбуки')}[short_kind]
             name = prefix + ' ' + name
         else:
-            category = ("Наушники" if re.search(r"\bairpods\b", name, re.I)
-                        else "Умные часы" if re.search(r"\b(?:apple|galaxy|pixel|samsung)\s+watch\b", name, re.I)
-                        else "Планшеты" if TABLET.search(name) else "Ноутбуки" if LAPTOP.search(name)
-                        else "Смартфоны" if PHONE.search(name) else "Другое")
+            category = identity.category
         if CONDITION.search(name):
             review.append({"line": number, "raw": original, "reason": "Состояние товара требует проверки"})
             continue
