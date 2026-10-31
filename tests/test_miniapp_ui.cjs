@@ -111,10 +111,11 @@ const firstTest=(async()=>{await new Promise(r=>setImmediate(r));assert.equal(el
   console.log('Bot topic list refresh uses saved topics without account or sync passed');
 
   const publicationCalls=[];let failPublish=false;
-  data['/publication']={enabled:false,published:2,uncertain:0,errors:0,retry_after:0,price_mode:'verified_only',problem_products:[],items:[{name:'iPhone 17 256',topic:'Apple',price:'90 000 ₽',status:'готов'}]};
+  data['/publication']={enabled:false,published:2,uncertain:0,errors:0,retry_after:0,price_mode:'verified_only',blockers:{total:3,needs_approval:1,hidden:0,missing_sim:1,no_offer:0,no_topic:1,no_forum:0},problem_products:[],items:[{name:'iPhone 17 256',topic:'Apple',price:'90 000 ₽',status:'готов'}]};
   context.fetch=async(url,opts={})=>{const key=url.replace('/miniapp/api','');publicationCalls.push({key,method:opts.method||'GET'});if(key==='/publication/enable'&&failPublish)return {ok:false,json:async()=>({detail:'Бот не имеет доступа'})};if(key==='/publication/enable')data['/publication'].enabled=true;if(key==='/publication/pause')data['/publication'].enabled=false;return {ok:true,json:async()=>data[key]||{ok:true}}};
   await vm.runInContext('loadPublication()',context);
   assert.match(all(elements.publication),/Публикация приостановлена/);
+  assert.match(all(elements.publication),/ожидают одобрения: 1/);assert.match(all(elements.publication),/не указана SIM: 1/);assert.match(all(elements.publication),/не назначена тема: 1/);
   assert.match(all(elements.publication),/Без подтверждённой цены товар показывается «По запросу»/);
   assert(!publicationCalls.some(x=>x.method==='POST'));
   await elements.publication.children.find(x=>x.textContent==='Предпросмотр').onclick();
