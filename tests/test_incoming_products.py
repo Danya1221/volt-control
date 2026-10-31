@@ -153,3 +153,52 @@ def test_prior_manual_import_recovers_provenance_only_from_actual_message(monkey
         assert len(session.scalars(select(miniapp.IncomingProduct)).all())==1
         assert _source_time(session,session.scalar(select(Offer)),datetime.now(timezone.utc)+timedelta(seconds=1))
     engine.dispose()
+
+
+def test_repeated_messages_latest_only_and_source_bound_without_typing(monkeypatch):
+    from app.main import Supplier
+    engine, db = setup(monkeypatch)
+    now=datetime.now(timezone.utc)
+    for mid, amount in [(20, 8000), (21, 8400), (22, 8500)]:
+        message=msg(mid, f'🎧AirPods 4 - {amount}', now-timedelta(minutes=22-mid))
+        persist(db,'miniapp-1234',1,message)
+        miniapp.stage_incoming_product('miniapp-1234',1,message,now)
+    client=TestClient(app);headers={'X-Telegram-Init-Data':signed()}
+    sources=client.get('/miniapp/api/product-sources',headers=headers).json()
+    assert len(sources)==1 and sources[0]['price']=='8500.00'
+    source=sources[0]
+    payload={'source_id':source['source_id'],'line':source['line'],'message_hash':source['message_hash'],'confirmed_today':True}
+    path=f"/miniapp/api/accounts/1/messages/{source['message_id']}/import-line"
+    assert client.post(path,json=payload,headers=headers).status_code==200
+    assert client.get('/miniapp/api/product-sources',headers=headers).json()==[]
+    with db() as session:
+        binding=session.scalar(select(miniapp.SupplierSourceBinding))
+        supplier=session.get(Supplier,binding.supplier_id)
+        assert supplier.name == 'Telegram miniapp-1234:1'
+        assert len(session.scalars(select(Supplier)).all())==1
+    engine.dispose()
+
+
+def test_stale_selection_is_rejected_and_other_sources_remain(monkeypatch):
+    engine, db=setup(monkeypatch)
+    now=datetime.now(timezone.utc)
+    first=msg(30,'🎧AirPods 4 - 8400',now-timedelta(minutes=3))
+    persist(db,'miniapp-1234',1,first);miniapp.stage_incoming_product('miniapp-1234',1,first,now)
+    client=TestClient(app);headers={'X-Telegram-Init-Data':signed()}
+    selected=client.get('/miniapp/api/product-sources',headers=headers).json()[0]
+    newer=msg(31,'🎧AirPods 4 - 8500',now-timedelta(minutes=1))
+    persist(db,'miniapp-1234',1,newer);miniapp.stage_incoming_product('miniapp-1234',1,newer,now)
+    with db() as session:
+        session.add(SupplierSource(account='miniapp-1234',chat_id=2,is_hi_catalog=False));session.commit()
+    other=msg(32,'🎧AirPods 4 - 8200',now)
+    persist(db,'miniapp-1234',2,other);miniapp.stage_incoming_product('miniapp-1234',2,other,now)
+    rows=client.get('/miniapp/api/product-sources',headers=headers).json()
+    assert len(rows)==2 and {row['chat_id'] for row in rows}=={'1','2'}
+    payload={'source_id':selected['source_id'],'line':selected['line'],'message_hash':selected['message_hash'],'confirmed_today':True}
+    assert client.post(f"/miniapp/api/accounts/1/messages/{selected['message_id']}/import-line",json=payload,headers=headers).status_code==409
+    latest=next(row for row in rows if row['chat_id']=='1')
+    with db() as session:
+        session.get(SupplierMessage,latest['message_id']).text='edited'
+        session.commit()
+    assert {row['chat_id'] for row in client.get('/miniapp/api/product-sources',headers=headers).json()}=={'2'}
+    engine.dispose()

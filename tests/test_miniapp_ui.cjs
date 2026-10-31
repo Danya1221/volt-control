@@ -67,7 +67,7 @@ const firstTest=(async()=>{await new Promise(r=>setImmediate(r));assert.equal(el
   assert.match(all(result),/AirPods 51 —/);
   const reviewList=result.children.find(x=>all(x).includes('Это iPhone — добавить'));
   const entry=reviewList.children[0];await entry.children.find(x=>x.textContent==='Это iPhone — добавить').onclick();
-  const input=entry.children[2].children.find(x=>x.tag==='input');input.value='supplier';context.confirm=()=>true;
+  assert(!entry.children[2].children.some(x=>x.tag==='input'));context.confirm=()=>true;
   const confirmSave=entry.children[2].children.find(x=>x.tag==='button');await confirmSave.onclick();
   const req=requests[requests.length-1];assert.equal(req.key,'/accounts/1/messages/10/import-line');assert.equal(req.body.confirmed_iphone,true);assert.equal(req.body.line,52);
   console.log('Price preview pagination and iPhone confirmation passed');
@@ -83,7 +83,7 @@ const firstTest=(async()=>{await new Promise(r=>setImmediate(r));assert.equal(el
   data['/product-sources']=[{product_id:77,slot:1,chat_id:'22',message_id:10,line:1,message_hash:'abc',price:'8400',source_at:'2026-10-29T12:00:00Z'}];
   await vm.runInContext('loadReviews()',context);
   const review=elements.reviews.children.find(x=>x.tag==='details');assert.match(all(review),/цена в сообщении: 8400/);assert.match(all(review),/не подтверждена/);
-  const sourceForm=review.children.find(x=>x.className==='form-stack');sourceForm.children.find(x=>x.tag==='input').value='Реальный поставщик';
+  const sourceForm=review.children.find(x=>x.className==='form-stack');assert(!sourceForm.children.some(x=>x.tag==='input')); 
   await sourceForm.children.find(x=>x.textContent==='Подтвердить цену на сегодня').onclick();
   const priceReq=requests[requests.length-1];assert.equal(priceReq.key,'/accounts/1/messages/10/import-line');assert.equal(priceReq.body.line,1);assert.equal(priceReq.body.confirmed_today,true);
   console.log('Incoming product and price review passed');
