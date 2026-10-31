@@ -243,6 +243,7 @@ async function loadPublication(showItems=false){
  try{
   const data=await api('/publication');
   status.textContent=(data.enabled?'Публикация включена.':'Публикация приостановлена.')+' Опубликовано: '+(data.published??0)+'.';
+  if(data.blockers){const b=data.blockers;const reasons=[];if(!b.total)reasons.push('В каталоге пока нет товаров');if(b.needs_approval)reasons.push('ожидают одобрения: '+b.needs_approval);if(b.hidden)reasons.push('скрыты: '+b.hidden);if(b.missing_sim)reasons.push('не указана SIM: '+b.missing_sim);if(b.no_offer)reasons.push('нет предложения поставщика: '+b.no_offer);if(b.no_forum)reasons.push('не привязан чат с темами: '+b.no_forum);if(b.no_topic)reasons.push('не назначена тема: '+b.no_topic);if(reasons.length)box.append(el('p','Не готовы к публикации — '+reasons.join(' · ')+'.','muted'));if(b.needs_approval)box.append(btn('Открыть проверки',async()=>showTab('reviews'),'secondary'))}
   if(data.errors)box.append(el('p','Ошибок публикации: '+data.errors+'. Проверь права бота и состояние товаров.','error'));
   if(data.uncertain)box.append(el('p','Не удалось подтвердить результат отправки для '+data.uncertain+' товаров. Повторная отправка не производится автоматически.','error'));
   if(data.retry_after)box.append(el('p','Telegram ограничил отправку. Повтор возможен примерно через '+data.retry_after+' сек.','muted'));
