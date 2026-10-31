@@ -239,3 +239,19 @@ def test_batch_stops_when_destination_changes():
     assert result['stopped'] == 'data_changed'
     assert bot.send_message.await_count == 1
     engine.dispose()
+
+
+def test_publication_status_explains_ineligible_products(monkeypatch):
+    engine, factory = setup_db()
+    monkeypatch.setattr(publisher, 'Sessions', factory)
+    with factory() as db:
+        db.add(Product(sku_key='no-offer',brand='Apple',model='AirPods',category='Наушники',
+                       memory='',color='',sim='',approved=True,hidden=False))
+        db.commit()
+    result = publisher.publication_status()
+    assert result['blockers']['total'] == 4
+    assert result['blockers']['needs_approval'] == 1
+    assert result['blockers']['missing_sim'] == 1
+    assert result['blockers']['no_offer'] == 1
+    assert len(result['items']) == 1
+    engine.dispose()
