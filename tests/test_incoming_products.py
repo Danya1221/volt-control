@@ -85,3 +85,71 @@ def test_incoming_source_exposed_only_to_owner_and_confirmed_explicitly(monkeypa
     assert client.get('/miniapp/api/product-sources',headers=headers).json()==[]
     assert client.post(path,json=payload,headers=headers).status_code==409
     engine.dispose()
+
+
+def test_confirmed_short_iphone_retains_real_telegram_timestamp(monkeypatch):
+    from app.publication_pricing import _source_time
+    from app.integrated_collector import SupplierMessageTime
+    engine, db = setup(monkeypatch)
+    now = datetime.now(timezone.utc)
+    source = msg(15, '17 Pro 256 Silver (1Sim+eSim) - 99000', now-timedelta(seconds=30))
+    persist(db, 'miniapp-1234', 1, source)
+    client = TestClient(app)
+    headers = {'X-Telegram-Init-Data':signed()}
+    with db() as session:
+        message = session.scalar(select(SupplierMessage).where(SupplierMessage.message_id==15))
+        assert session.get(SupplierMessageTime, message.id)
+        msg_id = message.id
+    path = f'/miniapp/api/accounts/1/messages/{msg_id}'
+    preview = client.get(path+'/preview', headers=headers).json()
+    payload = {'line':1, 'message_hash':preview['message_hash'], 'supplier_name':'Real supplier',
+               'confirmed_today':True, 'confirmed_iphone':True}
+    response = client.post(path+'/import-line', headers=headers, json=payload)
+    assert response.status_code==200
+    with db() as session:
+        offer = session.scalar(select(Offer))
+        assert _source_time(session, offer, datetime.now(timezone.utc)+timedelta(seconds=1)) is not None
+    engine.dispose()
+
+
+def test_ambiguous_source_without_telegram_date_never_gets_fabricated_provenance(monkeypatch):
+    from app.publication_pricing import _source_time
+    engine, db=setup(monkeypatch)
+    with db() as session:
+        session.add(SupplierMessage(account='miniapp-1234',chat_id=1,message_id=16,
+            text='17 Pro 256 Silver (eSIM) - 99000',seen_at=datetime.now(timezone.utc)))
+        session.commit()
+        msg_id=session.scalar(select(SupplierMessage.id))
+    client=TestClient(app);headers={'X-Telegram-Init-Data':signed()}
+    path=f'/miniapp/api/accounts/1/messages/{msg_id}'
+    preview=client.get(path+'/preview',headers=headers).json()
+    payload={'line':1,'message_hash':preview['message_hash'],'supplier_name':'Real supplier',
+             'confirmed_today':True,'confirmed_iphone':True}
+    assert client.post(path+'/import-line',json=payload,headers=headers).status_code==200
+    with db() as session:
+        assert _source_time(session,session.scalar(select(Offer)),datetime.now(timezone.utc)+timedelta(seconds=1)) is None
+    engine.dispose()
+
+
+def test_prior_manual_import_recovers_provenance_only_from_actual_message(monkeypatch):
+    from app.publication_pricing import _source_time
+    engine, db = setup(monkeypatch)
+    raw='17 Pro 256 Silver (eSIM) - 99000'
+    with db() as session:
+        session.add(SupplierMessage(account='miniapp-1234', chat_id=1, message_id=17, text=raw, seen_at=datetime.now(timezone.utc)))
+        session.commit()
+        stored_id=session.scalar(select(SupplierMessage.id))
+    client=TestClient(app);headers={'X-Telegram-Init-Data':signed()};path=f'/miniapp/api/accounts/1/messages/{stored_id}'
+    preview=client.get(path+'/preview',headers=headers).json()
+    assert client.post(path+'/import-line',headers=headers,json={'line':1,'message_hash':preview['message_hash'],
+        'supplier_name':'Real supplier','confirmed_today':True,'confirmed_iphone':True}).status_code==200
+    with db() as session:
+        assert not session.scalars(select(miniapp.IncomingProduct)).all()
+    stamp=datetime.now(timezone.utc)-timedelta(minutes=1)
+    message=msg(17,raw,stamp)
+    persist(db,'miniapp-1234',1,message)
+    miniapp.stage_incoming_product('miniapp-1234',1,message,datetime.now(timezone.utc))
+    with db() as session:
+        assert len(session.scalars(select(miniapp.IncomingProduct)).all())==1
+        assert _source_time(session,session.scalar(select(Offer)),datetime.now(timezone.utc)+timedelta(seconds=1))
+    engine.dispose()

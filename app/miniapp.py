@@ -30,7 +30,7 @@ from telethon.sessions import StringSession
 
 from app.main import Base, Sessions, Supplier, Product, Offer, Markup, ProductIn, FlagIn, AmountIn, key_for, today
 from app.main import products as list_products, approve as approve_product, hide as hide_product, markup as set_markup
-from app.integrated_collector import Base as CollectorBase, SupplierMessage, SupplierSource, monitor_account, NoAccessibleChats
+from app.integrated_collector import Base as CollectorBase, SupplierMessage, SupplierMessageTime, SupplierSource, monitor_account, NoAccessibleChats
 from app.price_parser import parse_lines
 
 log = logging.getLogger(__name__)
@@ -161,6 +161,27 @@ def stage_incoming_product(account, chat_id, message, now=None):
         if not source or not row or not hmac.compare_digest(hashlib.sha256(row.text.encode('utf-8')).hexdigest(), fingerprint):
             return
         parsed = parse_lines(raw_text, exclude_hi_android=bool(source.is_hi_catalog))
+        # Recover provenance for prior manual confirmations using Telegram's actual date.
+        candidates = parsed['candidates'] + [r['possible_iphone'] for r in parsed['needs_review'] if r.get('possible_iphone')]
+        imports = db.scalars(select(OfferImport).where(OfferImport.account == account,
+                            OfferImport.chat_id == chat_id, OfferImport.message_id == message.id,
+                            OfferImport.message_hash == fingerprint)).all()
+        for imported in imports:
+            candidate = next((c for c in candidates if c['line'] == imported.line and Decimal(c['cost']) == imported.cost), None)
+            product = db.get(Product, imported.product_id)
+            if not candidate or not product:
+                continue
+            item = ProductIn(brand=candidate['brand'], model=candidate['model'], category=candidate['category'], sim=candidate['sim'])
+            if product.sku_key != key_for(item):
+                continue
+            exists = db.scalar(select(IncomingProduct).where(IncomingProduct.account == account,
+                IncomingProduct.chat_id == chat_id, IncomingProduct.message_id == message.id,
+                IncomingProduct.line == imported.line, IncomingProduct.message_hash == fingerprint))
+            if not exists:
+                db.add(IncomingProduct(product_id=product.id, account=account, chat_id=chat_id,
+                    message_id=message.id, stored_message_id=row.id, line=imported.line,
+                    message_hash=fingerprint, source_price=imported.cost, source_at=stamp))
+        db.commit()
         for candidate in parsed['candidates']:
             if candidate['category'] not in AUTO_CATEGORIES or len(candidate['model']) > 200:
                 continue
@@ -862,6 +883,15 @@ def import_line(slot: int, message_id: int, body: ImportLineIn):
                 db.add(offer)
             else:
                 offer.cost, offer.confirmed_date, offer.active = cost, today(), True
+            meta = db.get(SupplierMessageTime, row.id)
+            if meta and not meta.outgoing:
+                verified = db.scalar(select(IncomingProduct).where(IncomingProduct.account == account_key,
+                    IncomingProduct.chat_id == row.chat_id, IncomingProduct.message_id == row.message_id,
+                    IncomingProduct.line == body.line, IncomingProduct.message_hash == fingerprint))
+                if verified is None:
+                    db.add(IncomingProduct(product_id=product.id, account=account_key, chat_id=row.chat_id,
+                        message_id=row.message_id, stored_message_id=row.id, line=body.line,
+                        message_hash=fingerprint, source_price=cost, source_at=meta.source_at))
             db.add(OfferImport(supplier_id=supplier.id, product_id=product.id, account=account_key,
                                chat_id=row.chat_id, message_id=row.message_id, line=body.line,
                                message_hash=fingerprint, cost=cost, imported_at=datetime.now(timezone.utc)))

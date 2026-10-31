@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.main as main
 from app import miniapp
-from app.integrated_collector import Base as CollectorBase, SupplierMessage, SupplierSource, persist
+from app.integrated_collector import Base as CollectorBase, SupplierMessage, SupplierMessageTime, SupplierSource, persist
 
 
 def test_import_on_disposable_postgres(monkeypatch):
@@ -40,6 +40,8 @@ def test_import_on_disposable_postgres(monkeypatch):
         miniapp.stage_incoming_product('miniapp-111', 12345678901, incoming, now)
         miniapp.stage_incoming_product('miniapp-111', 12345678901, incoming, now)
         with db_factory() as db:
+            stored = db.scalar(select(SupplierMessage).where(SupplierMessage.message_id == 51))
+            assert db.get(SupplierMessageTime, stored.id).source_at is not None
             staged = db.scalars(select(miniapp.IncomingProduct)).all()
             assert len(staged) == 1
             assert not db.get(main.Product, staged[0].product_id).approved

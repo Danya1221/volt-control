@@ -37,6 +37,13 @@ class SupplierMessage(Base):
     edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
+class SupplierMessageTime(Base):
+    __tablename__ = "supplier_telegram_message_times"
+    stored_message_id: Mapped[int] = mapped_column(primary_key=True)
+    source_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    outgoing: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class SupplierSource(Base):
     __tablename__ = "supplier_telegram_sources"
     __table_args__ = (UniqueConstraint("account", "chat_id"),)
@@ -78,6 +85,17 @@ def persist(db, account, chat_id, message, advance=False):
         row.text = message.raw_text or ""
         row.edited_at = message.edit_date
         row.seen_at = datetime.now(timezone.utc)
+        stamp = getattr(message, 'edit_date', None) or getattr(message, 'date', None)
+        if stamp is not None:
+            session.flush()
+            meta = session.get(SupplierMessageTime, row.id)
+            if meta is None:
+                meta = SupplierMessageTime(stored_message_id=row.id, source_at=stamp,
+                                           outgoing=bool(getattr(message, 'out', False)))
+                session.add(meta)
+            else:
+                meta.source_at = stamp
+                meta.outgoing = bool(getattr(message, 'out', False))
         if advance:
             cursor = session.scalar(select(ChatCursor).where(
                 ChatCursor.account == account, ChatCursor.chat_id == chat_id))
