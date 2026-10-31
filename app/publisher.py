@@ -332,13 +332,24 @@ def publication_status():
         by_product = {row.product_id: row for row in rows}
         items = []
         destination = db.get(CatalogDestination, 1)
-        if destination and destination.is_forum:
-            products = db.scalars(select(Product).order_by(Product.brand, Product.model, Product.memory, Product.color, Product.id)).all()
-            for product in products:
-                if not _eligible(db, product):
-                    continue
+        products = db.scalars(select(Product).order_by(Product.brand, Product.model, Product.memory, Product.color, Product.id)).all()
+        blockers = {'total': len(products), 'needs_approval': 0, 'hidden': 0,
+                    'missing_sim': 0, 'no_offer': 0, 'no_topic': 0, 'no_forum': 0}
+        for product in products:
+            if not product.approved:
+                blockers['needs_approval'] += 1
+            elif product.hidden:
+                blockers['hidden'] += 1
+            elif product.category.casefold().strip() == 'смартфоны' and not product.sim.strip():
+                blockers['missing_sim'] += 1
+            elif not db.scalar(select(Offer.id).where(Offer.product_id == product.id, Offer.active.is_(True)).limit(1)):
+                blockers['no_offer'] += 1
+            elif not destination or not destination.is_forum:
+                blockers['no_forum'] += 1
+            else:
                 topic = topic_for_product(db, destination.chat_id, product.brand, product.category, product.id)
                 if topic is None:
+                    blockers['no_topic'] += 1
                     continue
                 row = by_product.get(product.id)
                 price = publication_price(db, product)
@@ -349,7 +360,7 @@ def publication_status():
                 'retry_after': _retry_seconds(switch),
                 'uncertain': sum(row.state in ('pending', 'uncertain') for row in rows),
                 'errors': sum(row.state in ('send_failed', 'edit_failed', 'delete_failed') for row in rows),
-                'price_mode': 'verified_only',
+                'price_mode': 'verified_only', 'blockers': blockers,
                 'items': items,
                 'problem_products': [{'product_id': row.product_id, 'state': row.state, 'error': row.error}
                                      for row in rows if row.state != 'sent']}
