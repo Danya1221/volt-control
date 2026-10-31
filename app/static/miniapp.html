@@ -82,13 +82,12 @@ async function loadMessages(slot, container, before=null){
       function addEntry(parent,row,confirmIphone=false){
         const entry=el('div');entry.append(el('p',(confirmIphone?'Возможно, ': '')+row.model+' — '+row.cost+' ₽'+(row.sim?' · '+row.sim:'')));
         entry.append(btn(confirmIphone?'Это iPhone — добавить':'Добавить предложение',async()=>{
-          let form=el('div');const supplier=el('input');supplier.placeholder='Название реального поставщика';supplier.maxLength=200;
-          form.append(el('p','Проверьте название, конфигурацию и стоимость выше. Если предложение этого поставщика уже есть, его цена будет обновлена.','muted'),supplier);
+          let form=el('div');
+          form.append(el('p','Источник определяется автоматически по аккаунту и чату. Проверьте товар, конфигурацию и цену.','muted'));
           form.append(btn('Подтвердить цену на сегодня и добавить',async()=>{
-            const name=supplier.value.trim();if(!name)throw Error('Введите название поставщика');
             const question=(confirmIphone?'Подтверждаете, что это iPhone?\n':'')+'Цена '+row.cost+' ₽ для «'+row.model+'» подтверждена на сегодня?';
             if(!confirm(question))return;
-            const added=await api('/accounts/'+slot+'/messages/'+m.id+'/import-line',{method:'POST',body:JSON.stringify({line:row.line,message_hash:p.message_hash,supplier_name:name,confirmed_today:true,confirmed_iphone:confirmIphone})});
+            const added=await api('/accounts/'+slot+'/messages/'+m.id+'/import-line',{method:'POST',body:JSON.stringify({line:row.line,message_hash:p.message_hash,confirmed_today:true,confirmed_iphone:confirmIphone})});
             form.replaceChildren(el('p',added.approved?'Предложение обновлено.':'Добавлено. Товар ожидает одобрения.','status'));
           }));entry.append(form)
         },'secondary'));parent.append(entry)
@@ -184,13 +183,12 @@ async function loadReviews(){
  const pending=items.filter(p=>!p.approved||sources.some(s=>s.product_id===p.id));
  if(!pending.length){root.append(el('p','Очередь пуста.','muted'));return}
  root.append(el('p','Новые распознанные товары добавляются на проверку. Цены из сообщений не подтверждены и не используются автоматически.','muted'));
- for(const p of pending){const d=el('details');d.append(el('summary',p.model),el('p','Категория: '+p.category+' · SIM: '+(p.sim||'не указана'),'muted'));
+ for(const p of pending){const d=el('details');d.append(el('summary',p.model),el('p','Категория: '+p.category+(p.category==='Смартфоны'?' · SIM: '+(p.sim||'не указана'):' '),'muted'));
  const found=sources.filter(s=>s.product_id===p.id);
  if(!found.length)d.append(el('p','Сверьте товар с исходным сообщением в разделе «Поставщики».','muted'));
  for(const source of found){const form=el('div',undefined,'form-stack');const stamp=new Date(source.source_at).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'});
   form.append(el('p','Аккаунт '+source.slot+' · чат '+source.chat_id+' · сообщение: '+stamp+' МСК · цена в сообщении: '+source.price+' ₽ (не подтверждена)','muted'));
-  const name=el('input');name.placeholder='Название реального поставщика';name.maxLength=200;
-  form.append(name,btn('Подтвердить цену на сегодня',async()=>{const supplier=name.value.trim();if(!supplier)throw Error('Введите название поставщика');if(!confirm('Вы проверили, что цена '+source.price+' ₽ для «'+p.model+'» актуальна сегодня?'))return;await api('/accounts/'+source.slot+'/messages/'+source.message_id+'/import-line',{method:'POST',body:JSON.stringify({line:source.line,message_hash:source.message_hash,supplier_name:supplier,confirmed_today:true})});await loadReviews();await loadHome()}));d.append(form)
+  form.append(btn('Подтвердить цену на сегодня',async()=>{if(!confirm('Вы проверили, что цена '+source.price+' ₽ для «'+p.model+'» актуальна сегодня?'))return;await api('/accounts/'+source.slot+'/messages/'+source.message_id+'/import-line',{method:'POST',body:JSON.stringify({source_id:source.source_id,line:source.line,message_hash:source.message_hash,confirmed_today:true})});await loadReviews();await loadHome()}));d.append(form)
  }
  if(!p.approved)d.append(btn('Одобрить товар',async()=>{if(!confirm('Вы сверили товар с источником?'))return;await api('/products/'+p.id+'/approve',{method:'PATCH',body:JSON.stringify({value:true})});await loadReviews();await loadHome()},'secondary'));root.append(d)}
 }
