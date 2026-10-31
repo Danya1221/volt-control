@@ -21,7 +21,7 @@ from aiogram.exceptions import TelegramAPIError
 from cryptography.fernet import Fernet
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Integer, String, Text, DateTime, Numeric, ForeignKey, UniqueConstraint, select, text
+from sqlalchemy import BigInteger, Integer, String, Text, DateTime, Numeric, ForeignKey, UniqueConstraint, select, text, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 from telethon import TelegramClient, functions
@@ -113,6 +113,15 @@ class OfferImport(Base):
     message_hash: Mapped[str] = mapped_column(String(64))
     cost: Mapped[Decimal] = mapped_column(Numeric(14, 2))
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class SupplierSourceBinding(Base):
+    __tablename__ = 'supplier_source_bindings'
+    __table_args__ = (UniqueConstraint('account', 'chat_id'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account: Mapped[str] = mapped_column(String(100))
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    supplier_id: Mapped[int] = mapped_column(ForeignKey('suppliers.id'))
 
 
 class IncomingProduct(Base):
@@ -824,9 +833,10 @@ def message_preview(slot: int, message_id: int):
 class ImportLineIn(BaseModel):
     line: int = Field(ge=1)
     message_hash: str = Field(pattern=r'^[a-f0-9]{64}$')
-    supplier_name: str = Field(min_length=1, max_length=200)
+    supplier_name: str = Field(default='', max_length=200)
     confirmed_today: bool
     confirmed_iphone: bool = False
+    source_id: int | None = Field(default=None, gt=0)
 
 
 @router.post('/accounts/{slot}/messages/{message_id}/import-line', dependencies=[Depends(owner)])
@@ -834,8 +844,8 @@ def import_line(slot: int, message_id: int, body: ImportLineIn):
     """Import exactly one reviewed candidate, never a complete supplier batch."""
     validate_slot(slot)
     name = body.supplier_name.strip()
-    if not name or not body.confirmed_today:
-        raise HTTPException(422, 'Укажите поставщика и подтвердите, что цена актуальна сегодня')
+    if not body.confirmed_today:
+        raise HTTPException(422, 'Подтвердите, что цена актуальна сегодня')
     with Sessions() as db:
         account = db.get(ReaderAccount, slot)
         if not account:
@@ -866,12 +876,41 @@ def import_line(slot: int, message_id: int, body: ImportLineIn):
         if len(sku) > 600:
             raise HTTPException(422, 'Описание товара слишком длинное')
         try:
-            supplier = db.scalar(select(Supplier).where(Supplier.name == name))
-            if supplier is None:
-                supplier = Supplier(name=name)
-                db.add(supplier)
-                db.flush()
+            binding = db.scalar(select(SupplierSourceBinding).where(SupplierSourceBinding.account == account_key,
+                                 SupplierSourceBinding.chat_id == row.chat_id))
+            if binding:
+                supplier = db.get(Supplier, binding.supplier_id)
+                if not supplier:
+                    raise HTTPException(409, 'Сохранённый поставщик недоступен')
+                if name and name.casefold() != supplier.name.casefold():
+                    raise HTTPException(409, 'Для этого чата уже сохранён другой поставщик')
+            else:
+                previous_ids = db.scalars(select(OfferImport.supplier_id).where(
+                    OfferImport.account == account_key, OfferImport.chat_id == row.chat_id).distinct().limit(2)).all()
+                if len(previous_ids) > 1:
+                    raise HTTPException(409, 'Для этого источника ранее использовались разные поставщики; требуется сопоставление')
+                supplier = db.get(Supplier, previous_ids[0]) if previous_ids else None
+                if supplier and name and name.casefold() != supplier.name.casefold():
+                    raise HTTPException(409, 'Для этого источника уже использовался другой поставщик')
+                if not supplier:
+                    # This is a stable identifier for the actual connected account and chat,
+                    # not a generated supplier or sample record.
+                    source_name = name or f'Telegram {account_key}:{row.chat_id}'
+                    supplier = db.scalar(select(Supplier).where(Supplier.name == source_name))
+                    if supplier is None:
+                        supplier = Supplier(name=source_name)
+                        db.add(supplier)
+                        db.flush()
+                db.add(SupplierSourceBinding(account=account_key, chat_id=row.chat_id, supplier_id=supplier.id))
             product = db.scalar(select(Product).where(Product.sku_key == sku))
+            if body.source_id is not None:
+                if product is None:
+                    raise HTTPException(409, 'Товар изменился. Обновите проверку')
+                latest = db.scalar(select(IncomingProduct).where(IncomingProduct.account == account_key,
+                    IncomingProduct.chat_id == row.chat_id, IncomingProduct.product_id == product.id)
+                    .order_by(IncomingProduct.source_at.desc(), IncomingProduct.id.desc()).limit(1))
+                if not latest or latest.id != body.source_id or latest.stored_message_id != row.id or latest.line != body.line or latest.message_hash != fingerprint:
+                    raise HTTPException(409, 'Появилась более новая запись. Обновите проверку')
             if product is None:
                 product = Product(sku_key=sku, **product_input.model_dump(), approved=False, hidden=False)
                 db.add(product)
@@ -916,22 +955,33 @@ def product_sources():
                           OfferImport.account == IncomingProduct.account, OfferImport.chat_id == IncomingProduct.chat_id,
                           OfferImport.message_id == IncomingProduct.message_id, OfferImport.line == IncomingProduct.line,
                           OfferImport.message_hash == IncomingProduct.message_hash).exists()
-        records = db.execute(select(IncomingProduct, SupplierMessage).join(SupplierMessage,
-                             SupplierMessage.id == IncomingProduct.stored_message_id)
-                             .where(~confirmed)
+        latest_per_source = select(IncomingProduct.id.label('id'), func.row_number().over(
+            partition_by=(IncomingProduct.product_id, IncomingProduct.account, IncomingProduct.chat_id),
+            order_by=(IncomingProduct.source_at.desc(), IncomingProduct.id.desc())).label('rank')).subquery()
+        records = db.execute(select(IncomingProduct, SupplierMessage, confirmed.label('confirmed'))
+                             .join(latest_per_source, latest_per_source.c.id == IncomingProduct.id)
+                             .join(SupplierMessage, SupplierMessage.id == IncomingProduct.stored_message_id)
+                             .where(latest_per_source.c.rank == 1)
                              .order_by(IncomingProduct.source_at.desc(), IncomingProduct.id.desc()).limit(5000)).all()
+        bindings = {(b.account, b.chat_id): name for b, name in db.execute(
+            select(SupplierSourceBinding, Supplier.name).join(Supplier, Supplier.id == SupplierSourceBinding.supplier_id)).all()}
         output = []
-        per_product = {}
-        for source, message in records:
+        seen = set()
+        for source, message, already_confirmed in records:
             slot = accounts.get(source.account)
-            if not slot or per_product.get(source.product_id, 0) >= 5:
+            if not slot:
                 continue
-            if not hmac.compare_digest(hashlib.sha256(message.text.encode('utf-8')).hexdigest(), source.message_hash):
+            key = (source.product_id, source.account, source.chat_id)
+            if key in seen:
                 continue
-            per_product[source.product_id] = per_product.get(source.product_id, 0) + 1
-            output.append({'product_id': source.product_id, 'slot': slot, 'chat_id': str(source.chat_id),
+            # Never fall back to older prices if the latest source was confirmed or changed.
+            seen.add(key)
+            if already_confirmed or not hmac.compare_digest(hashlib.sha256(message.text.encode('utf-8')).hexdigest(), source.message_hash):
+                continue
+            output.append({'source_id': source.id, 'product_id': source.product_id, 'slot': slot, 'chat_id': str(source.chat_id),
                            'message_id': source.stored_message_id, 'line': source.line,
                            'message_hash': source.message_hash, 'price': str(source.source_price),
+                           'supplier_name': bindings.get((source.account, source.chat_id), ''),
                            'source_at': source.source_at.isoformat()})
         return output
 
