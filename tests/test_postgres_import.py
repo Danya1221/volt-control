@@ -50,9 +50,16 @@ def test_import_on_disposable_postgres(monkeypatch):
         result = miniapp.import_line(1, message_id, miniapp.ImportLineIn(
             line=1, message_hash=content_hash, supplier_name='Local test supplier', confirmed_today=True))
         assert result['approved'] is False
+        sources = miniapp.product_sources()
+        assert len(sources) == 1
+        source = sources[0]
+        assert source['supplier_name'] == 'Local test supplier'
+        miniapp.import_line(1, source['message_id'], miniapp.ImportLineIn(
+            source_id=source['source_id'], line=source['line'], message_hash=source['message_hash'], confirmed_today=True))
         with db_factory() as db:
+            assert len(db.scalars(select(main.Supplier)).all()) == 1
             assert db.get(main.Product, result['product_id']).approved is False
-            audit = db.scalar(select(miniapp.OfferImport))
+            audit = db.scalar(select(miniapp.OfferImport).where(miniapp.OfferImport.message_id == 50))
             assert audit.chat_id == 12345678901
             assert audit.message_hash == content_hash
             db.add(miniapp.CatalogDestination(id=1,chat_id=-10099,title='Local',is_forum=True,can_manage_topics=True,checked_at=datetime.now(timezone.utc)))
